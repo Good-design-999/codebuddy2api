@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import tempfile
 import time
 import unittest
@@ -205,6 +206,27 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('class="siterow"', body)
         # 站点按钮不能用 .row（justify-content: space-between 会把两个按钮推到两端）
         self.assertNotIn('class="row">\n        <button type="button" id="login-intl"', body)
+
+    def test_inline_script_has_no_unterminated_strings(self):
+        """PAGE_HTML 是普通三引号串，单个 \\n 会被 Python 变成真实换行，
+        把 JS 字符串从中间劈开，整个 <script> 语法错误、页面全白。
+        这里逐行查引号是否成对，拦住这类问题。"""
+        body = self.client.get("/").text
+        js = re.search(r"<script>(.*?)</script>", body, re.S).group(1)
+        broken = []
+        for i, line in enumerate(js.split("\n"), 1):
+            probe = re.sub(r"\\'", "", line)
+            probe = re.sub(r'"[^"]*"', "", probe)
+            if probe.count("'") % 2 != 0:
+                broken.append(f"第{i}行: {line.strip()[:60]}")
+        self.assertEqual(broken, [], "JS 字符串引号未闭合：\n" + "\n".join(broken))
+
+    def test_confirm_dialogs_use_real_newline_escapes(self):
+        """window.confirm 里的换行必须是 JS 转义 \\n，不能是 Python 解释出的真实换行。"""
+        js = re.search(r"<script>(.*?)</script>", self.client.get("/").text, re.S).group(1)
+        for line in js.split("\n"):
+            if "window.confirm" in line:
+                self.assertIn("\\n", line, f"confirm 缺少换行转义: {line.strip()[:60]}")
 
 
     def test_oauth_start_returns_link_and_requires_api_key(self):

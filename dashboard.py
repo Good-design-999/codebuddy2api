@@ -711,9 +711,9 @@ async function removeAccount(file, nickname) {
   const authFile = decodeURIComponent(file || '');
   if (!authFile || busy) return;
   const label = nickname || authFile;
-  if (!window.confirm('确定删除「' + label + '」？\n\n会真正删除 auth/' + authFile
+  if (!window.confirm('确定删除「' + label + '」？\\n\\n会真正删除 auth/' + authFile
       + ' 凭据文件，且不可恢复。')) return;
-  if (!window.confirm('再次确认：删除后该账号立即退出凭证池，需要重新扫码才能加回。\n\n仍要删除？')) return;
+  if (!window.confirm('再次确认：删除后该账号立即退出凭证池，需要重新扫码才能加回。\\n\\n仍要删除？')) return;
   busy = true;
   $('err').textContent = '';
   try {
