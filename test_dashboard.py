@@ -192,6 +192,21 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('id="login-intl"', body)
         self.assertIn('id="login-cn"', body)
 
+    def test_login_modal_starts_hidden_and_hidden_is_enforced(self):
+        body = self.client.get("/").text
+        # 弹窗默认必须带 hidden，否则一进页面就会挡住账号列表
+        self.assertIn('<div class="modal" id="login-modal" hidden>', body)
+        # .modal 是 display:flex，必须有一条 [hidden] 规则把它压回去，
+        # 否则 hidden 属性失效、关闭按钮点了也没反应
+        self.assertIn(".modal[hidden] { display: none; }", body)
+
+    def test_site_buttons_are_not_spread_apart(self):
+        body = self.client.get("/").text
+        self.assertIn('class="siterow"', body)
+        # 站点按钮不能用 .row（justify-content: space-between 会把两个按钮推到两端）
+        self.assertNotIn('class="row">\n        <button type="button" id="login-intl"', body)
+
+
     def test_oauth_start_returns_link_and_requires_api_key(self):
         started = {"login_id": "oa_test", "verification_uri": "https://example.com/login?state=xyz",
                    "expires_in": 300}

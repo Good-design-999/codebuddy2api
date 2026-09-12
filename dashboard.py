@@ -386,6 +386,7 @@ button {
   position: fixed; inset: 0; background: rgba(0, 0, 0, .55);
   display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 20;
 }
+.modal[hidden] { display: none; }
 .modal-box {
   background: var(--card); border: 1px solid var(--line); border-radius: 10px;
   padding: 20px; width: min(560px, 100%); max-height: 85vh; overflow: auto;
@@ -396,7 +397,11 @@ button {
   background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
   padding: 8px 10px; margin-top: 6px;
 }
-.sitebtn.on { color: var(--text); border-color: var(--accent); }
+.siterow { display: flex; gap: 10px; margin-top: 12px; }
+.sitebtn { flex: 1; font: inherit; padding: 8px 0; }
+.sitebtn.on { color: var(--text); border-color: var(--accent); background: var(--bg); }
+#login-body[hidden] { display: none; }
+.modal-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
 .tab {
   font: inherit; color: var(--muted); background: none; cursor: pointer;
   border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px;
@@ -471,7 +476,7 @@ button {
     <div class="modal-box">
       <div class="nick">添加账号</div>
       <div class="meta">选择站点后打开授权链接扫码；网页显示登录成功后会自动入库。</div>
-      <div class="row">
+      <div class="siterow">
         <button type="button" id="login-intl" class="sitebtn">国际站</button>
         <button type="button" id="login-cn" class="sitebtn">国内站</button>
       </div>
@@ -480,7 +485,7 @@ button {
         <a id="login-link" href="#" target="_blank" rel="noopener"></a>
         <div class="row"><span class="k">状态</span><span id="login-state">等待扫码…</span></div>
       </div>
-      <div class="row" style="margin-top:12px">
+      <div class="modal-actions">
         <button type="button" id="login-close">关闭</button>
       </div>
     </div>
