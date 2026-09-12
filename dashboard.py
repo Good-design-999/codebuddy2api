@@ -321,14 +321,14 @@ h1 { margin: 0; font-size: 20px; letter-spacing: .02em; }
 main { padding: 18px 24px 40px; }
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
 }
 .card {
   background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px 16px;
+  border-radius: 10px;
+  padding: 10px 12px;
 }
 .card.pick {
   cursor: pointer;
@@ -342,9 +342,19 @@ main { padding: 18px 24px 40px; }
   opacity: .48;
   border-style: dashed;
 }
-.nick { font-size: 16px; font-weight: 650; word-break: break-all; }
-.meta { color: var(--muted); font-size: 12px; margin: 4px 0 10px; }
-.row { display: flex; justify-content: space-between; gap: 12px; margin: 5px 0; }
+.acts { display: flex; gap: 6px; margin-top: 9px; }
+button.mini {
+  flex: 1; font: inherit; font-size: 12px; padding: 4px 0; cursor: pointer;
+  background: none; color: var(--muted); border: 1px solid var(--line); border-radius: 6px;
+}
+button.mini:hover { color: var(--text); border-color: var(--muted); }
+button.mini.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+button.mini.danger:hover {
+  color: #fff; background: var(--bad); border-color: var(--bad);
+}
+.nick { font-size: 14px; font-weight: 650; word-break: break-all; }
+.meta { color: var(--muted); font-size: 11px; margin: 3px 0 7px; }
+.row { display: flex; justify-content: space-between; gap: 12px; margin: 4px 0; font-size: 12px; }
 .k { color: var(--muted); }
 .ok { color: var(--ok); }
 .warn { color: var(--warn); }
@@ -548,10 +558,23 @@ async function load() {
                       : '<span class="warn">' + (a.checkin_message || '未成功') + '</span>') +
       '</div>' +
       '<div class="row"><span class="k">积分最早过期</span><span>' + (a.soonest_expiry || '-') + '</span></div>' +
+      '<div class="acts">' +
+        '<button type="button" class="mini act-toggle">' + (a.enabled ? '停用' : '启用') + '</button>' +
+        '<button type="button" class="mini danger act-remove">删除</button>' +
+      '</div>' +
     '</section>'
   ).join('') || '<div class="meta">还没有凭证</div>';
   document.querySelectorAll('.card.pick').forEach((el) => {
     el.onclick = () => toggle(el.dataset.file, el.dataset.enabled !== '1');
+    // 卡片整体就是 toggle 热区，按钮必须拦下冒泡，否则点按钮会连带把账号切一遍
+    el.querySelector('.act-toggle').onclick = (ev) => {
+      ev.stopPropagation();
+      toggle(el.dataset.file, el.dataset.enabled !== '1');
+    };
+    el.querySelector('.act-remove').onclick = (ev) => {
+      ev.stopPropagation();
+      removeAccount(el.dataset.file, el.querySelector('.nick').textContent);
+    };
   });
   $('routes').innerHTML = (data.recent_routes || []).map((row) =>
     '<tr><td>' + (row.at || '') + '</td><td>' + (row.nickname || '-') +
@@ -680,6 +703,45 @@ async function pollLogin() {
     + (data.imported ? ' → ' + data.imported : '');
   await load();
 }
+function loadModelsIfVisible() {
+  if (!$('view-models').hidden) return loadModels();
+  return Promise.resolve();
+}
+async function removeAccount(file, nickname) {
+  const authFile = decodeURIComponent(file || '');
+  if (!authFile || busy) return;
+  const label = nickname || authFile;
+  if (!window.confirm('确定删除「' + label + '」？\n\n会真正删除 auth/' + authFile
+      + ' 凭据文件，且不可恢复。')) return;
+  if (!window.confirm('再次确认：删除后该账号立即退出凭证池，需要重新扫码才能加回。\n\n仍要删除？')) return;
+  busy = true;
+  $('err').textContent = '';
+  try {
+    const res = await fetch('/admin/credentials/' + encodeURIComponent(authFile),
+                            { method: 'DELETE', headers: headers() });
+    if (res.status === 401) {
+      $('auth').style.display = 'block';
+      $('err').textContent = '需要 API key';
+      return;
+    }
+    if (res.status === 404) {
+      $('err').textContent = '凭据不在池中，可能已被删除';
+      await load();
+      return;
+    }
+    if (!res.ok) {
+      $('err').textContent = '删除失败 ' + res.status;
+      return;
+    }
+  } catch (e) {
+    $('err').textContent = '删除失败，请确认服务还在跑';
+    return;
+  } finally {
+    busy = false;
+  }
+  await load();
+  await loadModelsIfVisible();
+}
 async function toggle(file, enabled) {
   const authFile = decodeURIComponent(file || '');
   if (!authFile || busy) return;
@@ -707,6 +769,7 @@ async function toggle(file, enabled) {
     busy = false;
   }
   await load();
+  await loadModelsIfVisible();
 }
 $('save').onclick = () => {
   sessionStorage.setItem('codebuddy2api_key', $('key').value.trim());

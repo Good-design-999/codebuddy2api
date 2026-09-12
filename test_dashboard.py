@@ -235,6 +235,30 @@ class DashboardTests(unittest.TestCase):
         self.assertTrue(body["done"])
         self.assertIn("超时", body["error"])
 
+    def test_account_cards_carry_toggle_and_remove_buttons(self):
+        body = self.client.get("/").text
+        self.assertIn('class="acts"', body)
+        self.assertIn('act-toggle', body)
+        self.assertIn('act-remove', body)
+        # 卡片整体也是 toggle 热区，按钮必须拦冒泡，否则点删除会顺带切换启用状态
+        self.assertIn('ev.stopPropagation();', body)
+        # 删除不可恢复，必须有二次确认
+        self.assertIn('window.confirm', body)
+        self.assertIn("method: 'DELETE'", body)
+
+    def test_remove_credential_endpoint_requires_api_key(self):
+        converter.CONFIG["api_key"] = "test-only-api-key"
+        res = self.client.delete("/admin/credentials/alice.info")
+        self.assertEqual(res.status_code, 401)
+
+    def test_remove_credential_endpoint_reports_missing(self):
+        pool = Mock()
+        pool.remove_file.return_value = False
+        with patch.dict(converter.CONFIG, {"cred_pool": pool}):
+            res = self.client.delete("/admin/credentials/ghost.info")
+        self.assertEqual(res.status_code, 404)
+        pool.remove_file.assert_called_once_with("ghost.info")
+
     def test_selection_persists_and_skips_disabled_accounts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
