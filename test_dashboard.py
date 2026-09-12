@@ -184,6 +184,42 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(allowed.status_code, 200)
         self.assertEqual(sorted(allowed.json()["regions"].keys()), ["cn", "intl"])
 
+    def test_add_account_button_is_present_in_page(self):
+        res = self.client.get("/")
+        body = res.text
+        self.assertIn('id="add-account"', body)
+        self.assertIn('id="login-modal"', body)
+        self.assertIn('id="login-intl"', body)
+        self.assertIn('id="login-cn"', body)
+
+    def test_oauth_start_returns_link_and_requires_api_key(self):
+        started = {"login_id": "oa_test", "verification_uri": "https://example.com/login?state=xyz",
+                   "expires_in": 300}
+        with patch.object(converter._OAUTH, "start", return_value=started) as start:
+            res = self.client.post("/admin/oauth/start?site=intl")
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.json()["verification_uri"], started["verification_uri"])
+            self.assertEqual(start.call_args.kwargs.get("site"), "intl")
+        converter.CONFIG["api_key"] = "test-only-api-key"
+        self.assertEqual(self.client.post("/admin/oauth/start?site=cn").status_code, 401)
+
+    def test_oauth_start_rejects_unknown_site(self):
+        with patch.object(converter._OAUTH, "start", side_effect=ValueError("未知站点: x")):
+            res = self.client.post("/admin/oauth/start?site=x")
+        self.assertEqual(res.status_code, 400)
+
+    def test_oauth_poll_reports_pending_then_success(self):
+        with patch.object(converter._OAUTH, "poll", return_value={"done": False}) as poll:
+            res = self.client.get("/admin/oauth/poll?login_id=oa_test")
+            self.assertEqual(res.status_code, 200)
+            self.assertFalse(res.json()["done"])
+            self.assertEqual(poll.call_args.args[0], "oa_test")
+        with patch.object(converter._OAUTH, "poll",
+                          return_value={"done": True, "error": "登录超时，请重新发起"}):
+            body = self.client.get("/admin/oauth/poll?login_id=oa_test").json()
+        self.assertTrue(body["done"])
+        self.assertIn("超时", body["error"])
+
     def test_selection_persists_and_skips_disabled_accounts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -382,6 +382,21 @@ button {
 .tabs { display: flex; gap: 8px; padding: 12px 24px 0; }
 .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 .toolbar button { font: inherit; padding: 6px 14px; }
+.modal {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .55);
+  display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 20;
+}
+.modal-box {
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 20px; width: min(560px, 100%); max-height: 85vh; overflow: auto;
+}
+.modal-box .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+.modal-box a {
+  display: block; color: var(--accent); word-break: break-all; font-size: 12px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  padding: 8px 10px; margin-top: 6px;
+}
+.sitebtn.on { color: var(--text); border-color: var(--accent); }
 .tab {
   font: inherit; color: var(--muted); background: none; cursor: pointer;
   border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px;
@@ -414,6 +429,10 @@ button {
 <div class="err" id="err"></div>
 <main>
   <section id="view-accounts">
+    <div class="toolbar">
+      <button type="button" id="add-account">添加账号</button>
+      <span class="meta" id="add-hint">扫码登录后自动入库并热加入凭证池</span>
+    </div>
     <div class="grid" id="accounts"></div>
     <div class="card" style="margin-top:16px; overflow:auto">
       <div class="nick">最近路由</div>
@@ -448,6 +467,24 @@ button {
       </div>
     </div>
   </section>
+  <div class="modal" id="login-modal" hidden>
+    <div class="modal-box">
+      <div class="nick">添加账号</div>
+      <div class="meta">选择站点后打开授权链接扫码；网页显示登录成功后会自动入库。</div>
+      <div class="row">
+        <button type="button" id="login-intl" class="sitebtn">国际站</button>
+        <button type="button" id="login-cn" class="sitebtn">国内站</button>
+      </div>
+      <div id="login-body" hidden>
+        <div class="row"><span class="k">授权链接</span></div>
+        <a id="login-link" href="#" target="_blank" rel="noopener"></a>
+        <div class="row"><span class="k">状态</span><span id="login-state">等待扫码…</span></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button type="button" id="login-close">关闭</button>
+      </div>
+    </div>
+  </div>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -569,6 +606,75 @@ function showView(name) {
   });
   if (isModels) loadModels();
 }
+let loginTimer = null;
+let loginId = '';
+function stopLogin() {
+  if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
+  loginId = '';
+}
+function closeLogin() {
+  stopLogin();
+  $('login-modal').hidden = true;
+  $('login-body').hidden = true;
+  $('login-state').textContent = '等待扫码…';
+  document.querySelectorAll('.sitebtn').forEach((el) => el.classList.remove('on'));
+}
+async function startLogin(site, button) {
+  stopLogin();
+  $('login-state').textContent = '正在申请授权链接…';
+  $('login-body').hidden = false;
+  document.querySelectorAll('.sitebtn').forEach((el) => {
+    el.classList.toggle('on', el === button);
+  });
+  let res;
+  try {
+    res = await fetch('/admin/oauth/start?site=' + encodeURIComponent(site),
+                      { method: 'POST', headers: headers() });
+  } catch (e) {
+    $('login-state').textContent = '服务连不上，请确认服务还在跑';
+    return;
+  }
+  if (res.status === 401) {
+    $('login-state').textContent = '需要 API key';
+    return;
+  }
+  if (!res.ok) {
+    let detail = '';
+    try { detail = ((await res.json()).detail || {}).error?.message || ''; } catch (e) {}
+    $('login-state').textContent = '申请失败 ' + res.status + (detail ? ' · ' + detail : '');
+    return;
+  }
+  const data = await res.json();
+  loginId = data.login_id || '';
+  const link = data.verification_uri || '';
+  const a = $('login-link');
+  a.href = link;
+  a.textContent = link;
+  window.open(link, '_blank', 'noopener');
+  $('login-state').textContent = '等待扫码授权…';
+  loginTimer = setInterval(pollLogin, 1500);
+}
+async function pollLogin() {
+  if (!loginId) return;
+  let res;
+  try {
+    res = await fetch('/admin/oauth/poll?login_id=' + encodeURIComponent(loginId),
+                      { headers: headers() });
+  } catch (e) {
+    return;
+  }
+  if (!res.ok) return;
+  const data = await res.json();
+  if (!data.done) return;
+  stopLogin();
+  if (data.error) {
+    $('login-state').textContent = '登录失败：' + data.error;
+    return;
+  }
+  $('login-state').textContent = '登录成功：' + (data.nickname || data.uid || '')
+    + (data.imported ? ' → ' + data.imported : '');
+  await load();
+}
 async function toggle(file, enabled) {
   const authFile = decodeURIComponent(file || '');
   if (!authFile || busy) return;
@@ -606,6 +712,10 @@ document.querySelectorAll('.tab').forEach((el) => {
   el.onclick = () => showView(el.dataset.view);
 });
 $('reload-models').onclick = () => loadModels();
+$('add-account').onclick = () => { closeLogin(); $('login-modal').hidden = false; };
+$('login-close').onclick = () => closeLogin();
+$('login-intl').onclick = (e) => startLogin('intl', e.currentTarget);
+$('login-cn').onclick = (e) => startLogin('cn', e.currentTarget);
 load();
 setInterval(load, 30000);
 </script>
