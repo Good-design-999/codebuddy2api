@@ -49,7 +49,7 @@ class DeploymentTests(unittest.TestCase):
 
     def test_docker_copies_and_allows_all_local_runtime_imports(self):
         files = docker_sources()
-        self.assertTrue({"client_profiles.py", "site_routing.py", "trial_rewards.py"} <= files)
+        self.assertTrue({"client_profiles.py", "site_routing.py", "trial_rewards.py", "dashboard.py"} <= files)
         ignore = (ROOT / ".dockerignore").read_text().splitlines()
         self.assertEqual(ignore[1], "**")
         for filename in files:

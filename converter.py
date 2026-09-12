@@ -41,7 +41,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import uvicorn
 
 try:
@@ -73,6 +73,7 @@ from site_routing import (DOMESTIC, INTERNATIONAL, PROFILE_ENDPOINTS, site_for_a
                           profile_for_auth, profile_for_headers, profile_region, profile_product, profile_site,
                           chat_url_for_headers, refresh_url_for_auth)
 from client_profiles import CLI_VERSION, CLI_USER_AGENT, credential_headers, catalog_cache_key, account_key
+import dashboard
 try:
     import credits as credits_mod
 except ImportError:  # 模块缺失时签到/积分/快过期优先调度不可用
@@ -1295,6 +1296,11 @@ def _route_chat(payload, body, rid):
         _guard_request_size(body)
     url = chat_url_for_headers(headers)
     _log(f"[{rid}] ROUTE | region={profile_region(profile)} | profile={profile} | model={routed_model} | url={url}")
+    account = dashboard.account_from_cred(cred)
+    dashboard.record_route({
+        "ts": time.time(), "rid": rid, "region": profile_region(profile),
+        "profile": profile, "model": routed_model, **account,
+    })
     return body, cred, headers, url
 
 
@@ -1309,6 +1315,21 @@ def _note_cred_status(cred, status: int, model: str | None = None, raw: bytes = 
 def health():
     """公开存活检查，不访问或暴露凭证池。"""
     return {"status": "ok"}
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard_page():
+    """只读看板页面；账号数据仍走 /admin/dashboard。"""
+    return HTMLResponse(dashboard.PAGE_HTML)
+
+
+@app.get("/admin/dashboard")
+def admin_dashboard(authorization: Optional[str] = Header(default=None),
+                    x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
+    """只读看板数据：账号、积分、最近路由。不改调度。"""
+    _check_auth(authorization, x_api_key)
+    return dashboard.snapshot(pool=CONFIG.get("cred_pool"), ledger=CONFIG.get("ledger"),
+                              version=APP_VERSION)
 
 
 @app.get("/admin/credentials")
@@ -2657,6 +2678,7 @@ def main():
         preflight()
 
     sys.stderr.write(f"\n✅ 监听 http://{args.host}:{args.port}（直连后端，原生 function calling）\n")
+    sys.stderr.write("   GET  /                     (只读看板)\n")
     sys.stderr.write("   GET  /v1/models\n")
     sys.stderr.write("   POST /v1/chat/completions   (原生 tools/tool_calls，支持流式)\n")
     sys.stderr.write("   POST /v1/responses          (Responses API，Codex CLI 兼容)\n")

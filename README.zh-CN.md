@@ -128,6 +128,8 @@ Cherry Studio / ZCode / LobeChat / NextChat / Open WebUI 或自写 SDK 客户端
 
 | 共用接口 | 说明 |
 |------|------|
+| `GET /` | 只读看板：账号、积分、最近路由（页面） |
+| `GET /admin/dashboard` | 看板 JSON；启用 API key 后需鉴权 |
 | `GET /health` | 公开存活检查，仅返回 `{"status":"ok"}` |
 | `GET /v1/dashboard/billing/subscription` | 总积分折算余额（`hard_limit_usd`） |
 | `GET /v1/dashboard/billing/usage` | 用量（美分）与按日明细 |
