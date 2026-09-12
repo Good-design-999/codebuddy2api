@@ -10,6 +10,7 @@ Use your **WorkBuddy / CodeBuddy (Tencent)** subscription as local **OpenAI- and
 - **Seamless login**: add an account by scanning a QR code in your browser — the desktop client is **not** required
 - Multi-account pool: per-session sticky routing, zero-multiplier (`x0.00`) model preference, least-expiring-credit first, automatic cooldown on 401/429
 - Automatic token refresh and daily keepalive
+- **Local dashboard** at `GET /`: per-account credits, check-in state and recent routes, with click-to-enable account routing
 - Optional credit balance via OpenAI billing endpoints (`/v1/dashboard/billing/*`)
 
 ## Quick start
@@ -139,6 +140,12 @@ These original paths serve all supported regions and products. `/cn` and `/intl`
 | `GET /admin/credits` · `POST /admin/checkin` | Credit balances / manual daily check-in |
 
 Admin endpoints require `--api-key` when it is set. Use `/admin/credentials` for detailed pool status; `/health` never returns account, path or exception details.
+
+### Dashboard and account selection
+
+Open `http://127.0.0.1:8787/` in a browser to see the pool. Each card shows the account nickname, credit balance, soonest credit expiry, check-in result and active sticky sessions, followed by the most recent routes with the account that served each one. The page is served without authentication, but it only renders the markup: account data is fetched from `GET /admin/dashboard`, which requires the API key when one is set, so the board stays empty without it. The page itself is in Chinese.
+
+**Click a card to include or exclude that account.** Excluded accounts are skipped when picking a credential and when building request headers, and they are omitted from `/v1/models`, so a model only a disabled account could serve disappears from the catalog. Every account is enabled by default; only the disabled ones are recorded, in `auth/dashboard-selection.json`, so the selection survives restarts and an account added later starts enabled. `POST /admin/dashboard/accounts` toggles the same state without the browser.
 
 ### Credential imports
 
