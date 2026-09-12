@@ -4,13 +4,15 @@ Use your **WorkBuddy / CodeBuddy (Tencent)** subscription as local **OpenAI- and
 
 [中文文档](README.zh-CN.md)
 
+![Local dashboard: per-account credits, click-to-enable routing, recent routes with credit rate, and a per-region model list](docs/dashboard.png)
+
 ## Features
 
 - OpenAI Chat Completions / Responses and Anthropic Messages, with native tools / tool_calls and streaming SSE; automatic domestic / international and CLI / WorkBuddy backend routing through the original `/v1` endpoints
 - **Seamless login**: add an account by scanning a QR code in your browser — the desktop client is **not** required
 - Multi-account pool: per-session sticky routing, zero-multiplier (`x0.00`) model preference, least-expiring-credit first, automatic cooldown on 401/429
 - Automatic token refresh and daily keepalive
-- **Local dashboard** at `GET /`: per-account credits, check-in state and recent routes, with click-to-enable account routing
+- **Local dashboard** at `GET /`: per-account credits, check-in state and recent routes, each route showing the credit rate that applied; click a card or its button to enable / disable an account, add one via scan-to-login, or remove one — all in the browser; a separate **Models and rates** tab lists every model and its credit rate, split by region, refreshed on demand
 - Optional credit balance via OpenAI billing endpoints (`/v1/dashboard/billing/*`)
 
 ## Quick start
@@ -146,6 +148,14 @@ Admin endpoints require `--api-key` when it is set. Use `/admin/credentials` for
 Open `http://127.0.0.1:8787/` in a browser to see the pool. Each card shows the account nickname, credit balance, soonest credit expiry, check-in result and active sticky sessions, followed by the most recent routes with the account that served each one. The page is served without authentication, but it only renders the markup: account data is fetched from `GET /admin/dashboard`, which requires the API key when one is set, so the board stays empty without it. The page itself is in Chinese.
 
 **Click a card to include or exclude that account.** Excluded accounts are skipped when picking a credential and when building request headers, and they are omitted from `/v1/models`, so a model only a disabled account could serve disappears from the catalog. Every account is enabled by default; only the disabled ones are recorded, in `auth/dashboard-selection.json`, so the selection survives restarts and an account added later starts enabled. `POST /admin/dashboard/accounts` toggles the same state without the browser.
+
+Each card also carries an explicit **enable / disable** button (same effect as clicking the card) and a **remove** button that deletes the credential file — removal asks for confirmation twice, because it unlinks `auth/<name>.info` for real and cannot be undone.
+
+**Add an account** button on the same page starts scan-to-login: pick the site (international / domestic), a verification link opens, and the page polls until the account is saved, then refreshes the cards. It drives the same `/admin/oauth/start` and `/admin/oauth/poll` endpoints as `converter.py login`. When `--api-key` is set, the account data and these actions all require the key.
+
+The **Models and rates** tab lists every model with its credit rate, split into international and domestic columns, cheapest first, showing `Free` for `x0.00` entries. Rates are read from the per-account model catalogs already loaded in memory, so the tab never calls upstream. Refresh on demand with the **Refresh model list** button; it shows the last refresh time and does not poll on a timer. Models only served by a disabled account are not listed, matching routing.
+
+Recent routes carry the credit rate that applied to each request. The exact credits a single request consumed are not shown: the upstream usage detail is aggregated per day and model, and the routed model name is the client alias, which has no reliable mapping to the upstream model that actually executed.
 
 ### Credential imports
 
