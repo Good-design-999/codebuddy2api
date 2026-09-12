@@ -1340,6 +1340,15 @@ def admin_dashboard(authorization: Optional[str] = Header(default=None),
                               version=APP_VERSION, model_details=current_model_details())
 
 
+@app.get("/admin/models")
+def admin_models(authorization: Optional[str] = Header(default=None),
+                 x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
+    """模型倍率页数据：按地域（intl / cn）分组列出模型与 credits 倍率。"""
+    _check_auth(authorization, x_api_key)
+    details = {region: current_model_details(region) for region in ("intl", "cn")}
+    return {"regions": dashboard.models_view(details)}
+
+
 @app.post("/admin/dashboard/accounts")
 async def admin_toggle_account(request: Request,
                                authorization: Optional[str] = Header(default=None),

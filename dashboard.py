@@ -172,6 +172,32 @@ def _rates_by_model(model_details) -> dict:
     return out
 
 
+def models_view(details_by_region) -> dict:
+    """{region: [{id, credits, by_profile}]}；region 形如 intl / cn。
+
+    details_by_region 形如 {region: current_model_details(region)}，
+    倍率取该 region 下各 profile 的最小值，避免同一模型多档时读数含糊。
+    """
+    out: dict = {}
+    if not isinstance(details_by_region, dict):
+        return out
+    for region, details in details_by_region.items():
+        rows: list[dict] = []
+        for item in details or []:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("id")
+            if not name:
+                continue
+            by_profile = item.get("credits_by_profile")
+            by_profile = dict(by_profile) if isinstance(by_profile, dict) else {}
+            rows.append({"id": name, "credits": item.get("credits"),
+                         "by_profile": by_profile})
+        rows.sort(key=lambda row: (row["credits"] is None, row["credits"] if row["credits"] is not None else 0, row["id"]))
+        out[region] = rows
+    return out
+
+
 def _route_view(item: dict, rates: dict) -> dict:
     """单条路由：附上该模型的费用倍率。"""
     view = {**item, "at": _fmt_ts(item.get("ts"))}
@@ -353,6 +379,15 @@ button {
   cursor: pointer;
 }
 .err { color: var(--bad); margin: 12px 24px 0; }
+.tabs { display: flex; gap: 8px; padding: 12px 24px 0; }
+.tab {
+  font: inherit; color: var(--muted); background: none; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px;
+}
+.tab:hover { color: var(--text); }
+.tab.on { color: var(--text); background: var(--card); border-color: var(--accent); }
+.rate-free { color: var(--ok); }
+.rate-none { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -363,6 +398,10 @@ button {
   </div>
   <div class="totals" id="totals"></div>
 </header>
+<nav class="tabs">
+  <button type="button" class="tab on" data-view="accounts">账号</button>
+  <button type="button" class="tab" data-view="models">模型与倍率</button>
+</nav>
 <div class="auth" id="auth">
   已启用 API key，请输入后查看数据
   <div style="margin-top:8px">
@@ -372,15 +411,37 @@ button {
 </div>
 <div class="err" id="err"></div>
 <main>
-  <div class="grid" id="accounts"></div>
-  <div class="card" style="margin-top:16px; overflow:auto">
-    <div class="nick">最近路由</div>
-    <div class="meta">看模型还不够时，以这里的账号为准</div>
-    <table>
-      <thead><tr><th>时间</th><th>账号</th><th>模型</th><th>倍率</th><th>profile</th><th>文件</th></tr></thead>
-      <tbody id="routes"></tbody>
-    </table>
-  </div>
+  <section id="view-accounts">
+    <div class="grid" id="accounts"></div>
+    <div class="card" style="margin-top:16px; overflow:auto">
+      <div class="nick">最近路由</div>
+      <div class="meta">看模型还不够时，以这里的账号为准</div>
+      <table>
+        <thead><tr><th>时间</th><th>账号</th><th>模型</th><th>倍率</th><th>profile</th><th>文件</th></tr></thead>
+        <tbody id="routes"></tbody>
+      </table>
+    </div>
+  </section>
+  <section id="view-models" hidden>
+    <div class="grid">
+      <div class="card">
+        <div class="nick">国际版模型</div>
+        <div class="meta">走 intl-work / intl-cli；倍率为 credits 扣费系数，越小越省</div>
+        <table>
+          <thead><tr><th>模型</th><th>倍率</th><th>归属 profile</th></tr></thead>
+          <tbody id="models-intl"></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="nick">国内版模型</div>
+        <div class="meta">走 cn-cli / cn-work；倍率为 credits 扣费系数，越小越省</div>
+        <table>
+          <thead><tr><th>模型</th><th>倍率</th><th>归属 profile</th></tr></thead>
+          <tbody id="models-cn"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -452,6 +513,48 @@ async function load() {
     '</td><td>' + (row.auth_file || '') + '</td></tr>'
   ).join('') || '<tr><td colspan="6" class="k">还没有调用记录，先发一条请求</td></tr>';
 }
+function rateCell(credits) {
+  if (credits === null || credits === undefined) return '<span class="rate-none">-</span>';
+  if (credits === 0) return '<span class="rate-free">免费</span>';
+  return 'x' + credits;
+}
+function fillModels(target, rows) {
+  $(target).innerHTML = (rows || []).map((m) =>
+    '<tr><td>' + (m.id || '') + '</td><td>' + rateCell(m.credits) +
+    '</td><td>' + Object.keys(m.by_profile || {}).join(', ') + '</td></tr>'
+  ).join('') || '<tr><td colspan="3" class="k">该地域暂无可用模型</td></tr>';
+}
+async function loadModels() {
+  let res;
+  try {
+    res = await fetch('/admin/models', { headers: headers() });
+  } catch (e) {
+    $('err').textContent = '模型接口连不上，请确认服务还在跑';
+    return;
+  }
+  if (res.status === 401) {
+    $('auth').style.display = 'block';
+    $('err').textContent = '需要 API key';
+    return;
+  }
+  if (!res.ok) {
+    $('err').textContent = '模型接口 ' + res.status;
+    return;
+  }
+  const data = await res.json();
+  const regions = data.regions || {};
+  fillModels('models-intl', regions.intl);
+  fillModels('models-cn', regions.cn);
+}
+function showView(name) {
+  const isModels = name === 'models';
+  $('view-accounts').hidden = isModels;
+  $('view-models').hidden = !isModels;
+  document.querySelectorAll('.tab').forEach((el) => {
+    el.classList.toggle('on', el.dataset.view === name);
+  });
+  if (isModels) loadModels();
+}
 async function toggle(file, enabled) {
   const authFile = decodeURIComponent(file || '');
   if (!authFile || busy) return;
@@ -483,7 +586,11 @@ async function toggle(file, enabled) {
 $('save').onclick = () => {
   sessionStorage.setItem('codebuddy2api_key', $('key').value.trim());
   load();
+  if (!$('view-models').hidden) loadModels();
 };
+document.querySelectorAll('.tab').forEach((el) => {
+  el.onclick = () => showView(el.dataset.view);
+});
 load();
 setInterval(load, 30000);
 </script>

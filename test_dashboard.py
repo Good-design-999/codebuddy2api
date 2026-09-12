@@ -139,6 +139,51 @@ class DashboardTests(unittest.TestCase):
         body = dashboard.snapshot(pool=None, ledger=None, version="9.9.9")
         self.assertIsNone(body["recent_routes"][0]["rate"])
 
+    def test_models_view_groups_by_region_and_sorts_by_rate(self):
+        view = dashboard.models_view({
+            "intl": [
+                {"id": "gpt-5.5", "credits": 3.31, "credits_by_profile": {"intl-work": 3.31}},
+                {"id": "fast-model", "credits": 0.34, "credits_by_profile": {"intl-work": 0.34}},
+                {"id": "hy4-preview-f", "credits": 0.0, "credits_by_profile": {"intl-work": 0.0}},
+            ],
+            "cn": [
+                {"id": "glm-5.2", "credits": 0.79, "credits_by_profile": {"cn-cli": 0.79}},
+                {"id": "legacy", "credits": None, "credits_by_profile": {}},
+            ],
+        })
+        self.assertEqual([row["id"] for row in view["intl"]],
+                         ["hy4-preview-f", "fast-model", "gpt-5.5"])
+        # 无倍率的排在最后，不影响前面按倍率升序
+        self.assertEqual([row["id"] for row in view["cn"]], ["glm-5.2", "legacy"])
+        self.assertEqual(view["cn"][0]["by_profile"], {"cn-cli": 0.79})
+
+    def test_models_view_tolerates_missing_regions(self):
+        self.assertEqual(dashboard.models_view({}), {})
+        self.assertEqual(dashboard.models_view(None), {})
+        self.assertEqual(dashboard.models_view({"intl": None}), {"intl": []})
+
+    def test_admin_models_endpoint_returns_both_regions(self):
+        captured = []
+
+        def fake_details(region=None):
+            captured.append(region)
+            return [{"id": "fast-model", "credits": 0.34,
+                     "credits_by_profile": {"intl-work": 0.34}}]
+
+        with patch.object(converter, "current_model_details", side_effect=fake_details):
+            res = self.client.get("/admin/models")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(sorted(captured), ["cn", "intl"])
+        self.assertEqual(sorted(res.json()["regions"].keys()), ["cn", "intl"])
+
+    def test_admin_models_requires_api_key_when_configured(self):
+        converter.CONFIG["api_key"] = "test-only-api-key"
+        self.assertEqual(self.client.get("/admin/models").status_code, 401)
+        allowed = self.client.get("/admin/models",
+                                  headers={"Authorization": "Bearer test-only-api-key"})
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(sorted(allowed.json()["regions"].keys()), ["cn", "intl"])
+
     def test_selection_persists_and_skips_disabled_accounts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
