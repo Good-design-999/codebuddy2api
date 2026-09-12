@@ -103,13 +103,13 @@ class DashboardTests(unittest.TestCase):
     def test_record_route_keeps_account_not_token(self):
         cm = Mock()
         cm.path = "/tmp/auth/workbuddy-desktop.info"
-        cm.summary.return_value = {"nickname": "Leo solar energy", "uid": "uid-cn"}
+        cm.summary.return_value = {"nickname": "cn-user@example.com", "uid": "uid-cn"}
         dashboard.record_route({
             "ts": time.time(), "rid": "abcd", "region": "cn", "profile": "cn-cli",
             "model": "hy4-preview", **dashboard.account_from_cred((cm, 1)),
         })
         routes = dashboard.recent_routes()
-        self.assertEqual(routes[0]["nickname"], "Leo solar energy")
+        self.assertEqual(routes[0]["nickname"], "cn-user@example.com")
         self.assertEqual(routes[0]["auth_file"], "workbuddy-desktop.info")
         self.assertNotIn("token", routes[0])
 
