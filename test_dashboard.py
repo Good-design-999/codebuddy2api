@@ -113,6 +113,32 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(routes[0]["auth_file"], "workbuddy-desktop.info")
         self.assertNotIn("token", routes[0])
 
+    def test_routes_carry_rate_from_catalog(self):
+        cm = Mock()
+        cm.path = "/tmp/auth/alice.info"
+        cm.summary.return_value = {"nickname": "alice@example.com", "uid": "uid-a"}
+        dashboard.record_route({
+            "ts": time.time(), "rid": "beef", "region": "intl", "profile": "intl-work",
+            "model": "gpt-5.5", **dashboard.account_from_cred((cm, 1)),
+        })
+        body = dashboard.snapshot(
+            pool=None, ledger=None, version="9.9.9",
+            model_details=[{"id": "gpt-5.5", "credits": 3.31,
+                            "credits_by_profile": {"intl-work": 3.31}}],
+        )
+        self.assertEqual(body["recent_routes"][0]["rate"], 3.31)
+
+    def test_routes_without_catalog_report_none_rate(self):
+        cm = Mock()
+        cm.path = "/tmp/auth/bob.info"
+        cm.summary.return_value = {"nickname": "bob@example.com", "uid": "uid-b"}
+        dashboard.record_route({
+            "ts": time.time(), "rid": "cafe", "region": "cn", "profile": "cn-cli",
+            "model": "hy4-preview", **dashboard.account_from_cred((cm, 1)),
+        })
+        body = dashboard.snapshot(pool=None, ledger=None, version="9.9.9")
+        self.assertIsNone(body["recent_routes"][0]["rate"])
+
     def test_selection_persists_and_skips_disabled_accounts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

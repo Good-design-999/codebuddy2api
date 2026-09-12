@@ -1337,7 +1337,7 @@ def admin_dashboard(authorization: Optional[str] = Header(default=None),
     """看板数据：账号、积分、最近路由、是否启用。"""
     _check_auth(authorization, x_api_key)
     return dashboard.snapshot(pool=CONFIG.get("cred_pool"), ledger=CONFIG.get("ledger"),
-                              version=APP_VERSION)
+                              version=APP_VERSION, model_details=current_model_details())
 
 
 @app.post("/admin/dashboard/accounts")
@@ -1365,7 +1365,8 @@ async def admin_toggle_account(request: Request,
         raise HTTPException(status_code=404, detail={"error": {"message": f"凭据不在池中: {name}", "type": "invalid_request_error"}})
     dashboard.set_enabled(name, enabled)
     _publish_model_cache()
-    return dashboard.snapshot(pool=pool, ledger=CONFIG.get("ledger"), version=APP_VERSION)
+    return dashboard.snapshot(pool=pool, ledger=CONFIG.get("ledger"), version=APP_VERSION,
+                              model_details=current_model_details())
 
 
 @app.get("/admin/credentials")

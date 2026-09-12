@@ -128,7 +128,7 @@ def account_from_cred(cred) -> dict:
     }
 
 
-def snapshot(*, pool, ledger, version: str) -> dict:
+def snapshot(*, pool, ledger, version: str, model_details=None) -> dict:
     creds = pool.snapshot() if pool is not None else []
     ledger_snap = ledger.snapshot() if ledger is not None else {}
     if not isinstance(creds, list):
@@ -142,6 +142,7 @@ def snapshot(*, pool, ledger, version: str) -> dict:
             continue
         key = "international" if account.get("region") == "intl" else "domestic"
         groups[key] += float(account.get("credits") or 0)
+    rates = _rates_by_model(model_details)
     return {
         "version": version,
         "updated_at": time.time(),
@@ -151,10 +152,40 @@ def snapshot(*, pool, ledger, version: str) -> dict:
             "enabled": sum(1 for account in accounts if account.get("enabled")),
             "total": len(accounts),
         },
-        "recent_routes": [
-            {**item, "at": _fmt_ts(item.get("ts"))} for item in recent_routes()
-        ],
+        "recent_routes": [_route_view(item, rates) for item in recent_routes()],
     }
+
+
+def _rates_by_model(model_details) -> dict:
+    """{模型: {profile: 倍率}}；倍率来自模型目录的 credits_by_profile。"""
+    out: dict = {}
+    if not isinstance(model_details, (list, tuple)):
+        return out
+    for item in model_details:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("id")
+        if not name:
+            continue
+        by_profile = item.get("credits_by_profile")
+        out[name] = dict(by_profile) if isinstance(by_profile, dict) else {}
+    return out
+
+
+def _route_view(item: dict, rates: dict) -> dict:
+    """单条路由：附上该模型的费用倍率。"""
+    view = {**item, "at": _fmt_ts(item.get("ts"))}
+    model = item.get("model")
+    profile = item.get("profile")
+    by_profile = rates.get(model) if model else None
+    if isinstance(by_profile, dict) and by_profile:
+        value = by_profile.get(profile)
+        if value is None:
+            value = min(by_profile.values())
+        view["rate"] = value
+    else:
+        view["rate"] = None
+    return view
 
 
 def _account_view(item: dict, ledger_snap: dict) -> dict:
@@ -346,7 +377,7 @@ button {
     <div class="nick">最近路由</div>
     <div class="meta">看模型还不够时，以这里的账号为准</div>
     <table>
-      <thead><tr><th>时间</th><th>账号</th><th>模型</th><th>profile</th><th>文件</th></tr></thead>
+      <thead><tr><th>时间</th><th>账号</th><th>模型</th><th>倍率</th><th>profile</th><th>文件</th></tr></thead>
       <tbody id="routes"></tbody>
     </table>
   </div>
@@ -415,9 +446,11 @@ async function load() {
   });
   $('routes').innerHTML = (data.recent_routes || []).map((row) =>
     '<tr><td>' + (row.at || '') + '</td><td>' + (row.nickname || '-') +
-    '</td><td>' + (row.model || '') + '</td><td>' + (row.profile || '') +
+    '</td><td>' + (row.model || '') +
+    '</td><td>' + (row.rate === null || row.rate === undefined ? '-' : 'x' + row.rate) +
+    '</td><td>' + (row.profile || '') +
     '</td><td>' + (row.auth_file || '') + '</td></tr>'
-  ).join('') || '<tr><td colspan="5" class="k">还没有调用记录，先发一条请求</td></tr>';
+  ).join('') || '<tr><td colspan="6" class="k">还没有调用记录，先发一条请求</td></tr>';
 }
 async function toggle(file, enabled) {
   const authFile = decodeURIComponent(file || '');
