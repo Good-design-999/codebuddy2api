@@ -485,7 +485,7 @@ $('save').onclick = () => {
   load();
 };
 load();
-setInterval(load, 5000);
+setInterval(load, 30000);
 </script>
 </body>
 </html>
