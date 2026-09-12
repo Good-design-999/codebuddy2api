@@ -660,7 +660,8 @@ class CredentialPool:
         profile = profile or actual
         if not profile or profile != actual or not _in_region(profile, region):
             return False
-        configured = {candidate for item in self._entries if (candidate := self._entry_profile(item))
+        configured = {candidate for item in self._entries if self._routing_enabled(item)
+                      and (candidate := self._entry_profile(item))
                       and _in_region(candidate, region)}
         if profile not in _model_profiles(model, region, configured):
             return False
@@ -720,9 +721,14 @@ class CredentialPool:
             else:
                 break
 
+    def _routing_enabled(self, entry: dict) -> bool:
+        """看板未点亮的账号不参与选号，但仍可签到和刷新。"""
+        return dashboard.is_enabled(entry.get("id"))
+
     def _candidates(self, model: str | None, *, region=None) -> list[dict]:
         """可用凭证按（零计费优先, 快过期积分优先）排序；同级由调用方轮询。"""
         healthy = [entry for entry in self._entries if self._healthy(entry)
+                   and self._routing_enabled(entry)
                    and self._eligible(entry, model, region=region) and self._model_healthy(entry, model)]
         if not healthy:
             return []
@@ -783,6 +789,7 @@ class CredentialPool:
                 self.reload([cm.path], reset=False)
                 entry = next((entry for entry in self._entries if entry["cm"] is cm), None)
                 if (entry is not None and cm._generation == generation and self._healthy(entry)
+                        and self._routing_enabled(entry)
                         and self._eligible(entry, model, region=region, profile=profile) and self._model_healthy(entry, model)):
                     return ((cm, generation) if with_generation else cm), headers
         return None
@@ -837,6 +844,7 @@ class CredentialPool:
         with self._lock:
             now = time.time()
             pool = [entry for entry in self._entries if self._healthy(entry)
+                    and self._routing_enabled(entry)
                     and self._eligible(entry, model, region=region)]
             if not pool:
                 return None
@@ -1011,7 +1019,7 @@ def _publish_model_cache():
             accounts = {}
             for entry in pool.entries() if pool is not None else []:
                 identity, profile = entry.get("account_key"), entry.get("profile")
-                if not identity or not profile:
+                if not identity or not profile or not dashboard.is_enabled(entry.get("id")):
                     continue
                 key = catalog_cache_key(profile, identity)
                 accounts[identity] = {"profile": profile,
@@ -1319,17 +1327,45 @@ def health():
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard_page():
-    """只读看板页面；账号数据仍走 /admin/dashboard。"""
+    """看板页面；账号数据仍走 /admin/dashboard，点选走 POST /admin/dashboard/accounts。"""
     return HTMLResponse(dashboard.PAGE_HTML)
 
 
 @app.get("/admin/dashboard")
 def admin_dashboard(authorization: Optional[str] = Header(default=None),
                     x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
-    """只读看板数据：账号、积分、最近路由。不改调度。"""
+    """看板数据：账号、积分、最近路由、是否启用。"""
     _check_auth(authorization, x_api_key)
     return dashboard.snapshot(pool=CONFIG.get("cred_pool"), ledger=CONFIG.get("ledger"),
                               version=APP_VERSION)
+
+
+@app.post("/admin/dashboard/accounts")
+async def admin_toggle_account(request: Request,
+                               authorization: Optional[str] = Header(default=None),
+                               x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
+    """点选账号：enabled=true 参与路由，false 不参与。调度算法不变。"""
+    _check_auth(authorization, x_api_key)
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeError):
+        raise HTTPException(status_code=400, detail={"error": {"message": "请求体必须是 JSON 对象", "type": "invalid_request_error"}}) from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail={"error": {"message": "请求体必须是 JSON 对象", "type": "invalid_request_error"}})
+    raw = body.get("auth_file")
+    name = os.path.basename(str(raw or ""))
+    if not isinstance(raw, str) or not name or name != raw:
+        raise HTTPException(status_code=400, detail={"error": {"message": "auth_file 必须是凭证文件名", "type": "invalid_request_error"}})
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail={"error": {"message": "enabled 必须是布尔值", "type": "invalid_request_error"}})
+    pool = CONFIG.get("cred_pool")
+    names = {os.path.basename(entry["id"]) for entry in pool.entries()} if pool is not None else set()
+    if name not in names:
+        raise HTTPException(status_code=404, detail={"error": {"message": f"凭据不在池中: {name}", "type": "invalid_request_error"}})
+    dashboard.set_enabled(name, enabled)
+    _publish_model_cache()
+    return dashboard.snapshot(pool=pool, ledger=CONFIG.get("ledger"), version=APP_VERSION)
 
 
 @app.get("/admin/credentials")
@@ -1634,7 +1670,7 @@ def _catalog_for(profile: str):
         pool = CONFIG.get("cred_pool")
         models = None
         for entry in pool.entries() if pool is not None else []:
-            if entry.get("profile") != profile:
+            if entry.get("profile") != profile or not dashboard.is_enabled(entry.get("id")):
                 continue
             account = (accounts or {}).get(entry.get("account_key")) or {}
             if account.get("profile") == profile and account.get("models") is not None:
@@ -1656,7 +1692,9 @@ def _in_region(profile: str, region: str | None) -> bool:
 def _configured_profiles(region: str | None) -> set[str]:
     pool = CONFIG.get("cred_pool")
     if pool is not None:
-        return {profile for entry in pool.entries() if (profile := pool._entry_profile(entry))
+        return {profile for entry in pool.entries()
+                if dashboard.is_enabled(entry.get("id"))
+                and (profile := pool._entry_profile(entry))
                 and _in_region(profile, region)}
     cm = CONFIG.get("cred")
     if cm is not None:
@@ -2658,6 +2696,7 @@ def main():
     files = [Path(p) for p in args.auth_file]
     if not files:
         seed_credentials()  # 自管模式：启动时把桌面端缺失凭据复制进 auth/
+    dashboard.set_store(managed_auth_dir() / "dashboard-selection.json")
     CONFIG["cred_pool"] = CredentialPool(files, scan=not files)
     CONFIG["cred"] = CONFIG["cred_pool"].first()
     CONFIG["account_catalogs"] = {}  # 在任何维护线程/预检启动前关闭静态兜底。
@@ -2678,7 +2717,7 @@ def main():
         preflight()
 
     sys.stderr.write(f"\n✅ 监听 http://{args.host}:{args.port}（直连后端，原生 function calling）\n")
-    sys.stderr.write("   GET  /                     (只读看板)\n")
+    sys.stderr.write("   GET  /                     (看板：点卡片选用账号)\n")
     sys.stderr.write("   GET  /v1/models\n")
     sys.stderr.write("   POST /v1/chat/completions   (原生 tools/tool_calls，支持流式)\n")
     sys.stderr.write("   POST /v1/responses          (Responses API，Codex CLI 兼容)\n")

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""只读看板：账号、积分、最近路由。不改调度，不返回 token。"""
+"""看板：账号、积分、最近路由；点亮的账号才参与路由。不返回 token。"""
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -13,11 +14,78 @@ from pathlib import Path
 BJ = timezone(timedelta(hours=8))
 _HISTORY_LOCK = threading.Lock()
 _HISTORY: deque[dict] = deque(maxlen=80)
+_SELECTION_LOCK = threading.Lock()
+_DISABLED: set[str] = set()
+_STORE: Path | None = None
 
 
 def clear_routes():
     with _HISTORY_LOCK:
         _HISTORY.clear()
+
+
+def clear_selection():
+    global _STORE
+    with _SELECTION_LOCK:
+        _DISABLED.clear()
+        _STORE = None
+
+
+def set_store(path):
+    """从 JSON 加载停用名单；文件不存在则全部启用。"""
+    global _STORE
+    _STORE = Path(path) if path else None
+    load_selection()
+
+
+def load_selection():
+    names: set[str] = set()
+    path = _STORE
+    if path is not None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            data = {}
+        except (OSError, ValueError, UnicodeError):
+            data = {}
+        raw = data.get("disabled") if isinstance(data, dict) else None
+        if isinstance(raw, list):
+            names = {name for item in raw if (name := _basename(item))}
+    with _SELECTION_LOCK:
+        _DISABLED.clear()
+        _DISABLED.update(names)
+
+
+def is_enabled(auth_file) -> bool:
+    name = _basename(auth_file)
+    if not name:
+        return True
+    with _SELECTION_LOCK:
+        return name not in _DISABLED
+
+
+def set_enabled(auth_file, enabled: bool) -> bool:
+    name = _basename(auth_file)
+    if not name:
+        raise ValueError("missing auth_file")
+    with _SELECTION_LOCK:
+        if enabled:
+            _DISABLED.discard(name)
+        else:
+            _DISABLED.add(name)
+        disabled = sorted(_DISABLED)
+        path = _STORE
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps({"disabled": disabled}, ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8")
+        tmp.replace(path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    return bool(enabled)
 
 
 def record_route(entry: dict):
@@ -70,6 +138,8 @@ def snapshot(*, pool, ledger, version: str) -> dict:
     accounts = [_account_view(item, ledger_snap) for item in creds if isinstance(item, dict)]
     groups = {"domestic": 0.0, "international": 0.0}
     for account in accounts:
+        if not account.get("enabled"):
+            continue
         key = "international" if account.get("region") == "intl" else "domestic"
         groups[key] += float(account.get("credits") or 0)
     return {
@@ -77,6 +147,10 @@ def snapshot(*, pool, ledger, version: str) -> dict:
         "updated_at": time.time(),
         "accounts": accounts,
         "totals": {k: round(v, 2) for k, v in groups.items()},
+        "routing": {
+            "enabled": sum(1 for account in accounts if account.get("enabled")),
+            "total": len(accounts),
+        },
         "recent_routes": [
             {**item, "at": _fmt_ts(item.get("ts"))} for item in recent_routes()
         ],
@@ -103,6 +177,7 @@ def _account_view(item: dict, ledger_snap: dict) -> dict:
         "product": item.get("product"),
         "healthy": bool(item.get("healthy")),
         "token_expired": bool(item.get("token_expired")),
+        "enabled": is_enabled(auth_file),
         "sticky_sessions": int(item.get("sticky_sessions") or 0),
         "model_cooldowns": item.get("model_cooldowns") or {},
         "credits": round(float(remaining or 0), 2),
@@ -198,6 +273,18 @@ main { padding: 18px 24px 40px; }
   border-radius: 12px;
   padding: 14px 16px;
 }
+.card.pick {
+  cursor: pointer;
+  user-select: none;
+}
+.card.pick.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.card.pick.off {
+  opacity: .48;
+  border-style: dashed;
+}
 .nick { font-size: 16px; font-weight: 650; word-break: break-all; }
 .meta { color: var(--muted); font-size: 12px; margin: 4px 0 10px; }
 .row { display: flex; justify-content: space-between; gap: 12px; margin: 5px 0; }
@@ -241,7 +328,7 @@ button {
 <header>
   <div>
     <h1>codebuddy2api 看板</h1>
-    <div class="sub" id="sub">只读 · 不改调度 · 本机 127.0.0.1:8787</div>
+    <div class="sub" id="sub">点亮的账号才会被路由；没点亮的不会用</div>
   </div>
   <div class="totals" id="totals"></div>
 </header>
@@ -266,16 +353,21 @@ button {
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
+let busy = false;
+function headers() {
+  const h = { 'Content-Type': 'application/json' };
+  const key = sessionStorage.getItem('codebuddy2api_key') || '';
+  if (key) h['Authorization'] = 'Bearer ' + key;
+  return h;
+}
 function cls(ok, badLabel, okLabel) {
   return ok ? '<span class="ok">' + okLabel + '</span>' : '<span class="bad">' + badLabel + '</span>';
 }
 async function load() {
-  const headers = {};
-  const key = sessionStorage.getItem('codebuddy2api_key') || '';
-  if (key) headers['Authorization'] = 'Bearer ' + key;
+  if (busy) return;
   let res;
   try {
-    res = await fetch('/admin/dashboard', { headers });
+    res = await fetch('/admin/dashboard', { headers: headers() });
   } catch (e) {
     $('err').textContent = '看板接口连不上，请确认服务还在跑';
     return;
@@ -293,14 +385,21 @@ async function load() {
   $('err').textContent = '';
   const data = await res.json();
   const t = data.totals || {};
-  $('sub').textContent = 'v' + (data.version || '') + ' · 刷新于 ' + new Date(data.updated_at * 1000).toLocaleString('zh-CN', { hour12: false });
+  const r = data.routing || {};
+  $('sub').textContent = 'v' + (data.version || '') + ' · 点卡片选用账号 · 已启用 '
+    + (r.enabled ?? 0) + '/' + (r.total ?? 0)
+    + ' · ' + new Date(data.updated_at * 1000).toLocaleString('zh-CN', { hour12: false });
   $('totals').innerHTML =
-    '<div>国内 <b>' + (t.domestic ?? 0) + '</b></div>' +
-    '<div>国际 <b>' + (t.international ?? 0) + '</b></div>';
+    '<div>国内选用 <b>' + (t.domestic ?? 0) + '</b></div>' +
+    '<div>国际选用 <b>' + (t.international ?? 0) + '</b></div>';
   $('accounts').innerHTML = (data.accounts || []).map((a) =>
-    '<section class="card">' +
+    '<section class="card pick ' + (a.enabled ? 'on' : 'off') + '" data-file="' +
+      encodeURIComponent(a.auth_file || '') + '" data-enabled="' + (a.enabled ? '1' : '0') + '">' +
       '<div class="nick">' + (a.nickname || '(未命名)') + '</div>' +
       '<div class="meta">' + (a.profile || '') + ' · ' + (a.auth_file || '') + '</div>' +
+      '<div class="row"><span class="k">路由</span>' +
+        (a.enabled ? '<span class="ok">使用中 · 再点关闭</span>'
+                   : '<span class="warn">未选用 · 点一下启用</span>') + '</div>' +
       '<div class="row"><span class="k">积分</span><b>' + a.credits + '</b></div>' +
       '<div class="row"><span class="k">状态</span>' + cls(a.healthy && !a.token_expired, '异常', '健康') + '</div>' +
       '<div class="row"><span class="k">黏绑会话</span><span>' + a.sticky_sessions + '</span></div>' +
@@ -311,11 +410,42 @@ async function load() {
       '<div class="row"><span class="k">积分最早过期</span><span>' + (a.soonest_expiry || '-') + '</span></div>' +
     '</section>'
   ).join('') || '<div class="meta">还没有凭证</div>';
-  $('routes').innerHTML = (data.recent_routes || []).map((r) =>
-    '<tr><td>' + (r.at || '') + '</td><td>' + (r.nickname || '-') +
-    '</td><td>' + (r.model || '') + '</td><td>' + (r.profile || '') +
-    '</td><td>' + (r.auth_file || '') + '</td></tr>'
+  document.querySelectorAll('.card.pick').forEach((el) => {
+    el.onclick = () => toggle(el.dataset.file, el.dataset.enabled !== '1');
+  });
+  $('routes').innerHTML = (data.recent_routes || []).map((row) =>
+    '<tr><td>' + (row.at || '') + '</td><td>' + (row.nickname || '-') +
+    '</td><td>' + (row.model || '') + '</td><td>' + (row.profile || '') +
+    '</td><td>' + (row.auth_file || '') + '</td></tr>'
   ).join('') || '<tr><td colspan="5" class="k">还没有调用记录，先发一条请求</td></tr>';
+}
+async function toggle(file, enabled) {
+  const authFile = decodeURIComponent(file || '');
+  if (!authFile || busy) return;
+  busy = true;
+  $('err').textContent = '';
+  try {
+    const res = await fetch('/admin/dashboard/accounts', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ auth_file: authFile, enabled: !!enabled }),
+    });
+    if (res.status === 401) {
+      $('auth').style.display = 'block';
+      $('err').textContent = '需要 API key';
+      return;
+    }
+    if (!res.ok) {
+      $('err').textContent = '切换失败 ' + res.status;
+      return;
+    }
+  } catch (e) {
+    $('err').textContent = '切换失败，请确认服务还在跑';
+    return;
+  } finally {
+    busy = false;
+  }
+  await load();
 }
 $('save').onclick = () => {
   sessionStorage.setItem('codebuddy2api_key', $('key').value.trim());

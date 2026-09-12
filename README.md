@@ -128,8 +128,9 @@ These original paths serve all supported regions and products. `/cn` and `/intl`
 
 | Shared endpoint | Description |
 |------|------|
-| `GET /` | Read-only dashboard: accounts, credits, recent routes (HTML) |
+| `GET /` | Dashboard: click a card to include that account in routing |
 | `GET /admin/dashboard` | Dashboard JSON; requires the API key when one is set |
+| `POST /admin/dashboard/accounts` | Enable/disable an account (`{"auth_file":"a.info","enabled":true}`) |
 | `GET /health` | Public liveness only (`{"status":"ok"}`) |
 | `GET /v1/dashboard/billing/subscription` | Total credit balance as `hard_limit_usd` |
 | `GET /v1/dashboard/billing/usage` | Usage in cents, with daily cost breakdown |
