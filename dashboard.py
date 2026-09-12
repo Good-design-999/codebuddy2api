@@ -380,6 +380,8 @@ button {
 }
 .err { color: var(--bad); margin: 12px 24px 0; }
 .tabs { display: flex; gap: 8px; padding: 12px 24px 0; }
+.toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.toolbar button { font: inherit; padding: 6px 14px; }
 .tab {
   font: inherit; color: var(--muted); background: none; cursor: pointer;
   border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px;
@@ -423,6 +425,10 @@ button {
     </div>
   </section>
   <section id="view-models" hidden>
+    <div class="toolbar">
+      <button type="button" id="reload-models">刷新模型列表</button>
+      <span class="meta" id="models-stamp">倍率来自各账号模型目录缓存，按需刷新即可</span>
+    </div>
     <div class="grid">
       <div class="card">
         <div class="nick">国际版模型</div>
@@ -525,26 +531,34 @@ function fillModels(target, rows) {
   ).join('') || '<tr><td colspan="3" class="k">该地域暂无可用模型</td></tr>';
 }
 async function loadModels() {
-  let res;
+  const btn = $('reload-models');
+  btn.disabled = true;
   try {
-    res = await fetch('/admin/models', { headers: headers() });
-  } catch (e) {
-    $('err').textContent = '模型接口连不上，请确认服务还在跑';
-    return;
+    let res;
+    try {
+      res = await fetch('/admin/models', { headers: headers() });
+    } catch (e) {
+      $('err').textContent = '模型接口连不上，请确认服务还在跑';
+      return;
+    }
+    if (res.status === 401) {
+      $('auth').style.display = 'block';
+      $('err').textContent = '需要 API key';
+      return;
+    }
+    if (!res.ok) {
+      $('err').textContent = '模型接口 ' + res.status;
+      return;
+    }
+    const data = await res.json();
+    const regions = data.regions || {};
+    fillModels('models-intl', regions.intl);
+    fillModels('models-cn', regions.cn);
+    $('models-stamp').textContent = '上次刷新 '
+      + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  } finally {
+    btn.disabled = false;
   }
-  if (res.status === 401) {
-    $('auth').style.display = 'block';
-    $('err').textContent = '需要 API key';
-    return;
-  }
-  if (!res.ok) {
-    $('err').textContent = '模型接口 ' + res.status;
-    return;
-  }
-  const data = await res.json();
-  const regions = data.regions || {};
-  fillModels('models-intl', regions.intl);
-  fillModels('models-cn', regions.cn);
 }
 function showView(name) {
   const isModels = name === 'models';
@@ -591,6 +605,7 @@ $('save').onclick = () => {
 document.querySelectorAll('.tab').forEach((el) => {
   el.onclick = () => showView(el.dataset.view);
 });
+$('reload-models').onclick = () => loadModels();
 load();
 setInterval(load, 30000);
 </script>
