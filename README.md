@@ -18,7 +18,7 @@ Use your **WorkBuddy / CodeBuddy (Tencent)** subscription as local **OpenAI- and
 ### 1. Install
 
 ```bash
-git clone https://github.com/maiphucgiang/codebuddy2api.git
+git clone https://github.com/Good-design-999/codebuddy2api.git
 cd codebuddy2api
 
 uv venv
