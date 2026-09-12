@@ -205,7 +205,7 @@ Compose 自动读取 `.env` 中已声明的变量，Shell 环境优先；使用�
 
 ### 使用发布镜像
 
-将 `.env` 中 `CODEBUDDY2API_IMAGE` 改为 `ghcr.io/maiphucgiang/codebuddy2api:<版本>`，然后执行：
+将 `.env` 中 `CODEBUDDY2API_IMAGE` 改为 `ghcr.io/good-design-999/codebuddy2api:<版本>`，然后执行：
 
 ```bash
 docker compose pull

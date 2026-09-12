@@ -205,7 +205,7 @@ Open the login link, scan, and wait for the terminal to confirm saving; add `--s
 
 ### Published images
 
-Set `CODEBUDDY2API_IMAGE` in `.env` to `ghcr.io/maiphucgiang/codebuddy2api:<version>`, then run:
+Set `CODEBUDDY2API_IMAGE` in `.env` to `ghcr.io/good-design-999/codebuddy2api:<version>`, then run:
 
 ```bash
 docker compose pull
