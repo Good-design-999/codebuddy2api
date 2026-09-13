@@ -378,27 +378,42 @@ class ConfigurationTests(unittest.TestCase):
             converter.main()
             server.assert_called_once()
             return {key: converter.CONFIG[key] for key in (
-                "max_images", "image_policy", "max_request_bytes", "log_body_limit")}
+                "max_images", "image_policy", "max_request_bytes", "log_body_limit", "admin_csrf")}
 
     def test_defaults(self):
         self.assertEqual(self.configure(), {"max_images": 16, "image_policy": "truncate",
-                                           "max_request_bytes": 33554432, "log_body_limit": 65536})
+                                           "max_request_bytes": 33554432, "log_body_limit": 65536, "admin_csrf": True})
 
     def test_environment_and_explicit_cli_precedence(self):
         env = {"CODEBUDDY2API_MAX_IMAGES": "8", "CODEBUDDY2API_IMAGE_POLICY": "error",
                "CODEBUDDY2API_MAX_REQUEST_BYTES": "100000", "CODEBUDDY2API_LOG_BODY_LIMIT": "0"}
         self.assertEqual(self.configure(env), {"max_images": 8, "image_policy": "error",
-                                               "max_request_bytes": 100000, "log_body_limit": 0})
+                                               "max_request_bytes": 100000, "log_body_limit": 0, "admin_csrf": True})
         env["CODEBUDDY2API_IMAGE_POLICY"] = "invalid-overridden"
         self.assertEqual(self.configure(env, ("--max-images", "0", "--image-policy", "truncate"))["max_images"], 0)
+
+    def test_admin_csrf_startup_flag_and_environment_precedence(self):
+        cases = [
+            ({}, ("--admin-csrf", "false"), False),
+            ({"CODEBUDDY2API_ADMIN_CSRF": "false"}, (), False),
+            ({"CODEBUDDY2API_ADMIN_CSRF": "true"}, (), True),
+            ({"CODEBUDDY2API_ADMIN_CSRF": "true"}, ("--admin-csrf", "false"), False),
+            ({"CODEBUDDY2API_ADMIN_CSRF": "false"}, ("--admin-csrf", "true"), True),
+            ({"CODEBUDDY2API_ADMIN_CSRF": "false"}, ("--admin-csrf",), True),
+            ({"CODEBUDDY2API_ADMIN_CSRF": "invalid-overridden"}, ("--admin-csrf", "true"), True),
+        ]
+        for env, flags, expected in cases:
+            with self.subTest(env=env, flags=flags):
+                self.assertIs(self.configure(env, flags)["admin_csrf"], expected)
 
     def test_invalid_config_fails_before_side_effects(self):
         for env in ({"CODEBUDDY2API_MAX_IMAGES": "-1"}, {"CODEBUDDY2API_MAX_IMAGES": "1.5"},
                     {"CODEBUDDY2API_IMAGE_POLICY": "drop"}, {"CODEBUDDY2API_MAX_REQUEST_BYTES": "0"},
-                    {"CODEBUDDY2API_LOG_BODY_LIMIT": "-1"}):
+                    {"CODEBUDDY2API_LOG_BODY_LIMIT": "-1"}, {"CODEBUDDY2API_ADMIN_CSRF": "invalid"}):
             with self.subTest(env=env):
                 self.configure(env, invalid=True)
         self.configure(flags=("--max-images", "-1"), invalid=True)
+        self.configure(flags=("--admin-csrf", "invalid"), invalid=True)
 
 
 class LogIntegrationTests(unittest.TestCase):

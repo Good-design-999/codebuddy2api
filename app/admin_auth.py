@@ -57,6 +57,10 @@ class AdminAuth:
             self._identity = secrets.token_urlsafe(32)
         return key
 
+    def csrf_enabled(self):
+        """Only an explicitly disabled startup option skips browser-origin protection."""
+        return self.config.get("admin_csrf", True) is not False
+
     def enabled(self):
         with self.lock:
             return bool(self._key())
@@ -140,7 +144,8 @@ class AdminMiddleware:
         cookie = not identity and session is not None
         if not public_session and not identity and not cookie:
             return await error_response(401, "管理认证无效或会话已过期")(scope, receive, no_cache)
-        if cookie and not public_session and (method not in ("GET", "HEAD", "OPTIONS") or path == "/admin/oauth/poll"):
+        if (self.auth.csrf_enabled() and cookie and not public_session
+                and (method not in ("GET", "HEAD", "OPTIONS") or path == "/admin/oauth/poll")):
             supplied = request.headers.get("x-csrf-token", "")
             if not same_origin(request) or not hmac.compare_digest(supplied.encode(), session["csrf_token"].encode()):
                 return await error_response(403, "Origin 或 CSRF 校验失败")(scope, receive, no_cache)

@@ -1191,6 +1191,7 @@ PASSTHROUGH_BODY_KEYS = {
 
 app = FastAPI(title="codebuddy2api", version=APP_VERSION)
 CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
+                "admin_csrf": True,     # 管理 Origin/CSRF 校验，仅允许启动配置关闭
                 "models_remote": None,   # 国内站云端模型表（缓存或同步结果）
                 "models_intl": None,     # 国际站云端模型表（仅当有国际凭证且有额度时对外暴露）
                 "model_cache": None,     # ModelCatalogCache：按站点分组持久化，TTL 内不打云端
@@ -2680,6 +2681,9 @@ def main():
     ap.add_argument("--port", type=int, default=8787)
     ap.add_argument("--api-key", default=os.environ.get("CODEBUDDY2API_KEY", ""),
                     help="可选：要求客户端携带的 API key（默认不校验）")
+    ap.add_argument("--admin-csrf", type=_boolean_arg, nargs="?", const=True,
+                    default=os.environ.get("CODEBUDDY2API_ADMIN_CSRF", "true"),
+                    help="管理 Origin/CSRF 校验，默认 true；仅在受信任本地环境设为 false，鉴权仍启用")
     ap.add_argument("--log", default=None, metavar="PATH",
                     help="额外写入兼容文本日志（如 --log converter.log 或 --log /tmp/cb.log）。"
                          "不传仍记录 SQLite 审计，但不输出文本文件。")
@@ -2774,6 +2778,8 @@ def main():
         sys.stderr.write("   每日签到 + 快过期积分优先调度已启用\n")
     if args.api_key:
         sys.stderr.write("   鉴权已启用（API key 已设置）\n")
+    if not CONFIG["admin_csrf"]:
+        sys.stderr.write("   警告：管理 Origin/CSRF 校验已关闭，仅限受信任本地环境；API key 与会话校验仍启用。\n")
     sys.stderr.write(f"   图片限制  : {CONFIG['max_images']} 张/请求，策略 {CONFIG['image_policy']}\n")
     if CONFIG["log_path"]:
         sys.stderr.write(f"   日志      : {CONFIG['log_path']}\n")

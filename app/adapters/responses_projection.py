@@ -587,6 +587,8 @@ def _build_tool_call_name_map(messages: list[dict]) -> dict[str, str]:
     return mapping
 
 
+
+
 def _summarize_tool_output(text: str) -> str:
     text = (text or "").strip()
     if not text:

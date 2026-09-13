@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]  # 仓库根
 RUNTIME_DEFAULTS = {
     "max_images": 16, "image_policy": "truncate",
     "max_request_bytes": 33554432, "log_body_limit": 65536,
+    "admin_csrf": True,
 }
 API_ENDPOINTS = {
     "chat/completions": "POST", "responses": "POST", "messages": "POST",
@@ -78,6 +79,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(values["CODEBUDDY2API_BIND"], "127.0.0.1")
         self.assertEqual(values["CODEBUDDY2API_IMAGE"], "codebuddy2api:local")
         self.assertEqual(values["CODEBUDDY2API_AUTO_TRIAL"], "false")
+        self.assertEqual(values["CODEBUDDY2API_ADMIN_CSRF"], str(RUNTIME_DEFAULTS["admin_csrf"]).lower())
 
     def test_docker_copies_and_allows_all_local_runtime_imports(self):
         files = docker_sources()
@@ -159,7 +161,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn("env_file:", text)
         self.assertNotIn("required:", text)
         for name, fallback in (("MAX_IMAGES", "16"), ("IMAGE_POLICY", "truncate"),
-                               ("MAX_REQUEST_BYTES", "33554432"), ("LOG_BODY_LIMIT", "65536")):
+                               ("MAX_REQUEST_BYTES", "33554432"), ("LOG_BODY_LIMIT", "65536"), ("ADMIN_CSRF", "true")):
             self.assertIn("${CODEBUDDY2API_" + name + ":-" + fallback + "}", text)
         for filename in ("README.md", "README.zh-CN.md"):
             doc = (ROOT / filename).read_text()

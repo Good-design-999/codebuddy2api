@@ -197,7 +197,7 @@ def install_admin(app, config, gateway):
 
     @route("POST", "/admin/session")
     async def session_login(request):
-        if not same_origin(request):
+        if auth.csrf_enabled() and not same_origin(request):
             return error_response(403, "登录请求 Origin 校验失败")
         data = await _body(request, 8192)
         result, status = auth.login(request, data.get("api_key"))

@@ -95,6 +95,88 @@ class AdminApiTests(unittest.TestCase):
         self.assertFalse(self.client.get("/v1/identity", headers={"Cookie": f"{COOKIE_NAME}={cookie}"}).json()["authorization_present"])
         self.assertEqual(self.client.post("/admin/legacy", headers=self.headers).status_code, 200)
 
+    def test_admin_csrf_defaults_to_enabled_and_requires_explicit_false(self):
+        self.assertTrue(self.auth.csrf_enabled())
+        for value in (True, None, 0, "false"):
+            with self.subTest(value=value):
+                self.config["admin_csrf"] = value
+                self.assertTrue(self.auth.csrf_enabled())
+                self.assertEqual(self.client.post("/admin/session", json={"api_key": "synthetic-key"}).status_code, 403)
+        self.config["admin_csrf"] = False
+        self.assertFalse(self.auth.csrf_enabled())
+
+    def test_disabled_csrf_allows_cookie_writes_and_oauth_poll(self):
+        self.config["admin_csrf"] = False
+        response = self.client.post("/admin/session", json={"api_key": "synthetic-key"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["csrf_token"])
+        self.assertIn("HttpOnly", response.headers["set-cookie"])
+        self.assertIn("SameSite=strict", response.headers["set-cookie"])
+        self.assertIn("Path=/admin", response.headers["set-cookie"])
+        self.assertEqual(self.client.post("/admin/legacy").status_code, 200)
+        self.assertEqual(self.client.post("/admin/legacy", headers={
+            "Origin": "https://different.invalid", "X-CSRF-Token": "invalid"}).status_code, 200)
+        started = self.client.post("/admin/oauth/start?site=cn")
+        self.assertEqual(started.status_code, 200, started.text)
+        for _ in range(2):
+            polled = self.client.get("/admin/oauth/poll", params={"login_id": started.json()["login_id"]})
+            self.assertEqual(polled.status_code, 200, polled.text)
+            self.assertEqual(polled.json()["imported"], "first.info")
+        self.gateway._OAUTH.start.assert_called_once_with(site="cn")
+        self.gateway._OAUTH.poll.assert_called_once()
+        self.gateway._save_oauth_credential.assert_called_once()
+        self.assertEqual(self.client.delete("/admin/session").status_code, 200)
+        self.assertEqual(self.client.post("/admin/legacy").status_code, 401)
+
+    def test_disabled_csrf_keeps_authentication_and_sensitive_action_checks(self):
+        self.config["admin_csrf"] = False
+        self.assertEqual(self.client.post("/admin/legacy").status_code, 401)
+        self.assertEqual(self.client.post("/admin/legacy", headers={"X-Api-Key": "wrong"}).status_code, 401)
+        self.assertEqual(self.client.post("/admin/session", json={"api_key": "wrong"}).status_code, 401)
+        self.login()
+        cookie = self.client.cookies.get(COOKIE_NAME)
+        self.assertFalse(self.client.get("/v1/identity", headers={"Cookie": f"{COOKIE_NAME}={cookie}"}).json()["authorization_present"])
+        response = self.client.post("/admin/logs/clear", json={"scope": "all", "confirmation": CLEAR_CONFIRMATION})
+        self.assertEqual(response.status_code, 403)
+        self.audit.clear.assert_not_called()
+        self.gateway.admin_delete_guard.side_effect = ValueError("referenced")
+        self.assertEqual(self.client.delete("/admin/credentials/first.info").status_code, 409)
+        self.config["api_key"] = "rotated-key"
+        self.assertEqual(self.client.post("/admin/legacy").status_code, 401)
+        self.config["api_key"] = ""
+        for path in ("/admin/session", "/admin/settings", "/admin/credentials"):
+            self.assertEqual(self.client.get(path).status_code, 503)
+
+    def test_disabled_csrf_keeps_oauth_ownership_and_official_site_checks(self):
+        self.config["admin_csrf"] = False
+        self.login()
+        started = self.client.post("/admin/oauth/start")
+        self.assertEqual(started.status_code, 200)
+        other = self.enterContext(TestClient(self.app))
+        self.login(other)
+        response = other.get("/admin/oauth/poll", params={"login_id": started.json()["login_id"]})
+        self.assertEqual(response.status_code, 404)
+        self.gateway._OAUTH.poll.assert_not_called()
+        self.gateway._save_oauth_credential.assert_not_called()
+        self.gateway._OAUTH.start.return_value = {"login_id": "evil", "verification_uri": "https://www.codebuddy.cn.evil.invalid/login"}
+        self.assertEqual(self.client.post("/admin/oauth/start").status_code, 502)
+
+    def test_disabled_csrf_keeps_login_throttle(self):
+        self.config["admin_csrf"] = False
+        for _ in range(10):
+            self.assertEqual(self.client.post("/admin/session", json={"api_key": "wrong"}).status_code, 401)
+        self.assertEqual(self.client.post("/admin/session", json={"api_key": "synthetic-key"}).status_code, 429)
+
+    def test_admin_csrf_cannot_be_changed_through_management_settings(self):
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                self.config["admin_csrf"] = enabled
+                response = self.client.patch("/admin/settings", headers=self.headers, json={
+                    "revision": 0, "values": {"admin_csrf": not enabled}})
+                self.assertEqual(response.status_code, 400)
+                self.assertIs(self.config["admin_csrf"], enabled)
+                self.assertNotIn("admin_csrf", self.store.snapshot()["settings"])
+
     def test_session_cookie_flags_logout_and_rotation(self):
         response = self.client.post("/admin/session", json={"api_key": "synthetic-key"}, headers={"Origin": "http://testserver"})
         cookie = response.headers["set-cookie"]
@@ -270,6 +352,8 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["verification_uri"], "https://www.codebuddy.cn/login")
         self.assertEqual(self.client.get("/admin/oauth/poll?login_id=task").status_code, 403)
+        self.assertEqual(self.client.get("/admin/oauth/poll?login_id=task", headers={
+            "X-CSRF-Token": csrf["X-CSRF-Token"]}).status_code, 403)
         other = self.enterContext(TestClient(self.app))
         other_csrf = self.login(other)
         self.assertEqual(other.get("/admin/oauth/poll?login_id=task", headers=other_csrf).status_code, 404)

@@ -14,6 +14,7 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 |------|---------|-------------|
 | `--host` / `--port` | `127.0.0.1` / `8787` | Local listener |
 | `--api-key` | none | Shared management and inference key; management is locked without it |
+| `--admin-csrf [true/false]` | `true` | Startup-only management Origin/CSRF checks; disabling does not bypass API-key or session authentication |
 | `--auth-file` | scan `auth/` | Explicit credential file, repeatable; disables scanning other files |
 | `--log` | none | Additional text logs, 50 MiB rotation and 2 backups; SQLite auditing remains enabled |
 | `--desensitize` | off | Adapt fixed CLI templates, compact runtime prompts and mask keywords with zero-width characters |
@@ -30,7 +31,7 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 | `--max-request-bytes` | `33554432` | Positive byte limit for the processed upstream JSON |
 | `--log-body-limit` | `65536` | Text-log body preview bytes; `0` logs summaries only, not the SQLite diagnostic budget |
 
-Environment variables include `CODEBUDDY_AUTH_DIR`, `CODEBUDDY_IMPORT_DIR`, `CODEBUDDY2API_KEY`, `CODEBUDDY2API_LOG`, `CODEBUDDY2API_MAX_IMAGES`, `CODEBUDDY2API_IMAGE_POLICY`, `CODEBUDDY2API_MAX_REQUEST_BYTES`, `CODEBUDDY2API_LOG_BODY_LIMIT` and `CODEBUDDY2API_AUTO_TRIAL`. See [deployment](deployment.md) for startup examples.
+Environment variables include `CODEBUDDY_AUTH_DIR`, `CODEBUDDY_IMPORT_DIR`, `CODEBUDDY2API_KEY`, `CODEBUDDY2API_ADMIN_CSRF`, `CODEBUDDY2API_LOG`, `CODEBUDDY2API_MAX_IMAGES`, `CODEBUDDY2API_IMAGE_POLICY`, `CODEBUDDY2API_MAX_REQUEST_BYTES`, `CODEBUDDY2API_LOG_BODY_LIMIT` and `CODEBUDDY2API_AUTO_TRIAL`. See [deployment](deployment.md) for startup examples.
 
 Trial-credit claims are off by default and only apply to upstream-eligible `intl-work` accounts. Successful/already-claimed results persist per account in `auth/trial-ledger.json`. Failures wait at least 24 hours without immediate POST replay; eligibility and amounts are determined upstream. Keep this file when upgrading.
 
@@ -61,6 +62,20 @@ Trial-credit claims are off by default and only apply to upstream-eligible `intl
 Pages use `/dashboard/*`, management APIs use `/admin/*`, and clients retain `/v1/*`. `/cn` and `/intl` API prefixes are not registered. Automatic model routing requires no client URL changes.
 
 Management requires an API key. The WebUI exchanges that key for an HttpOnly management Cookie, which only authorizes `/admin/*`, not `/v1/*`. API clients send `Authorization: Bearer <key>` or `X-Api-Key`. An empty key preserves legacy unauthenticated inference only, not management. `/health` never exposes account, path or exception details.
+
+### Management Origin / CSRF switch
+
+Enabled by default. To disable it in a trusted local environment, append `--admin-csrf false` to the existing startup command or set this in your existing `.env`:
+
+```dotenv
+CODEBUDDY2API_ADMIN_CSRF=false
+```
+
+This is startup-only, CLI takes precedence over the environment, and the WebUI cannot change it. Use a source/image build containing this option and the updated Compose configuration. Recreate the container after changing its environment; `docker compose restart` alone is insufficient. Adding the variable does not add this feature to an older image.
+
+Disabling skips login Origin checks and Origin/CSRF checks on Cookie-authenticated management writes and OAuth polling. API keys, session expiry, OAuth task ownership, official authorization-site validation and dangerous-action confirmations remain enforced; `/v1/*` is unaffected.
+
+**Disabling weakens browser cross-site request protection; do not expose this configuration directly to the public Internet.** Set `--admin-csrf true` or the environment value to `true`, then restart to re-enable protection.
 
 ### Server-side path imports
 

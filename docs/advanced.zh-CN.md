@@ -14,6 +14,7 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 |------|--------|------|
 | `--host` / `--port` | `127.0.0.1` / `8787` | 本地监听地址与端口 |
 | `--api-key` | 无 | 管理与推理共用密钥；未设置时管理锁定 |
+| `--admin-csrf [true/false]` | `true` | 管理 Origin/CSRF 校验；仅启动配置可关闭，API key 和会话鉴权不变 |
 | `--auth-file` | 扫描 `auth/` | 指定凭据文件，可重复传入；不再扫描其他文件 |
 | `--log` | 无 | 额外文本日志，50 MiB 轮转、保留 2 份；不影响默认 SQLite 审计 |
 | `--desensitize` | 关 | 适配固定 CLI 模板、压缩运行时提示、零宽脱敏关键词 |
@@ -30,7 +31,7 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 | `--max-request-bytes` | `33554432` | 处理后的上游 JSON 字节上限，须为正整数 |
 | `--log-body-limit` | `65536` | 兼容文本日志正文预览字节；`0` 只记摘要，不控制 SQLite 诊断预算 |
 
-环境变量包括 `CODEBUDDY_AUTH_DIR`、`CODEBUDDY_IMPORT_DIR`、`CODEBUDDY2API_KEY`、`CODEBUDDY2API_LOG`，以及 `CODEBUDDY2API_MAX_IMAGES`、`CODEBUDDY2API_IMAGE_POLICY`、`CODEBUDDY2API_MAX_REQUEST_BYTES`、`CODEBUDDY2API_LOG_BODY_LIMIT`、`CODEBUDDY2API_AUTO_TRIAL`。启动示例见 [部署指南](deployment.zh-CN.md)。
+环境变量包括 `CODEBUDDY_AUTH_DIR`、`CODEBUDDY_IMPORT_DIR`、`CODEBUDDY2API_KEY`、`CODEBUDDY2API_ADMIN_CSRF`、`CODEBUDDY2API_LOG`，以及 `CODEBUDDY2API_MAX_IMAGES`、`CODEBUDDY2API_IMAGE_POLICY`、`CODEBUDDY2API_MAX_REQUEST_BYTES`、`CODEBUDDY2API_LOG_BODY_LIMIT`、`CODEBUDDY2API_AUTO_TRIAL`。启动示例见 [部署指南](deployment.zh-CN.md)。
 
 体验积分领取默认关闭，仅适用于符合上游资格的 `intl-work` 账号。成功或已领取的结果按账号保存到 `auth/trial-ledger.json`，失败至少退避 24 小时，不立即重放 POST；资格与额度以上游为准，升级时保留该文件。
 
@@ -61,6 +62,20 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 页面使用 `/dashboard/*`，管理 API 使用 `/admin/*`，客户端保留原 `/v1/*`；不注册 `/cn`、`/intl` API 前缀。模型自动选路不要求客户端改变地址。
 
 管理必须配置 API key；WebUI 使用同 key 建立 HttpOnly 管理 Cookie，Cookie 仅授权 `/admin/*`，不能用于 `/v1/*`。命令行 API 请求携带 `Authorization: Bearer <key>` 或 `X-Api-Key`。空 key 仅保留推理接口的历史无鉴权行为，不开放管理；`/health` 不返回账号、路径或异常详情。
+
+### 管理 Origin / CSRF 开关
+
+默认开启。在受信任本地环境需要关闭时，在原启动命令追加 `--admin-csrf false`，或在已有 `.env` 中设置：
+
+```dotenv
+CODEBUDDY2API_ADMIN_CSRF=false
+```
+
+仅启动时生效，CLI 优先于环境变量，不能通过 WebUI 修改。使用包含该开关的源码或镜像，并更新 Compose 配置；修改环境后须重新创建容器，不能仅执行 `docker compose restart`。旧镜像不会因新增变量自动获得此功能。
+
+关闭会跳过登录请求的 Origin 检查，以及 Cookie 管理写操作和 OAuth 轮询的 Origin/CSRF 检查；API key、会话有效期、OAuth 任务归属、官方授权地址白名单和危险操作确认仍保留，不影响 `/v1/*`。
+
+**关闭会降低浏览器跨站请求保护，不应将此配置直接暴露到公网。** 恢复 `--admin-csrf true` 或环境变量 `true` 并重启即可重新启用。
 
 ### 服务端路径导入
 

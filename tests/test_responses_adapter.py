@@ -454,6 +454,7 @@ def test_responses_projection_keeps_last_user_when_it_carries_harness():
     print("✅ test_responses_projection_keeps_last_user_when_it_carries_harness")
 
 
+
 def test_stream_converter_text():
     """测试：Chat SSE 文本流 → Responses 事件流。"""
     conv = ResponsesStreamConverter(model="glm-5.2")
