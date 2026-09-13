@@ -13,7 +13,7 @@ from fastapi import FastAPI, Header
 from fastapi.testclient import TestClient
 
 from app.admin_api import CLEAR_CONFIRMATION, install_admin
-from app.admin_auth import COOKIE_NAME
+from app.admin_auth import COOKIE_NAME, same_origin
 from app.control_store import ControlStore
 
 
@@ -94,6 +94,73 @@ class AdminApiTests(unittest.TestCase):
         # Force the cookie onto an inference request: middleware still never injects key.
         self.assertFalse(self.client.get("/v1/identity", headers={"Cookie": f"{COOKIE_NAME}={cookie}"}).json()["authorization_present"])
         self.assertEqual(self.client.post("/admin/legacy", headers=self.headers).status_code, 200)
+
+    def test_same_origin_referer_fallback_is_strict_and_get_only(self):
+        from starlette.requests import Request
+        valid = "http://testserver/dashboard/credentials?tab=oauth"
+        cases = [
+            ("GET", {"Referer": valid}, True),
+            ("HEAD", {"Referer": "http://TESTSERVER:80/dashboard"}, True),
+            ("GET", {"Sec-Fetch-Site": "same-origin"}, True),
+            ("GET", {}, False),
+            ("POST", {"Referer": valid}, False),
+            ("DELETE", {"Referer": valid}, False),
+            ("GET", {"Sec-Fetch-Site": "cross-site", "Referer": valid}, False),
+            ("GET", {"Sec-Fetch-Site": "same-site", "Referer": valid}, False),
+            ("GET", {"Sec-Fetch-Site": "none", "Referer": valid}, False),
+            ("GET", {"Sec-Fetch-Site": "", "Referer": valid}, False),
+            ("GET", {"Origin": "null", "Referer": valid, "Sec-Fetch-Site": "same-origin"}, False),
+            ("GET", {"Origin": "", "Referer": valid, "Sec-Fetch-Site": "same-origin"}, False),
+            ("GET", {"Origin": "https://evil.invalid", "Referer": valid}, False),
+            ("GET", {"Origin": "http://testserver/path", "Referer": valid}, False),
+            ("GET", {"Origin": "http://testserver", "Referer": "https://evil.invalid"}, True),
+        ]
+        for invalid in ("https://testserver/dashboard", "http://testserver:8787/dashboard",
+                        "http://testserver:0/dashboard", "http://testserver.evil.invalid/dashboard",
+                        "http://user:password@testserver/dashboard", "http://@testserver/dashboard",
+                        "http://testserver/dashboard#fragment", "//testserver/dashboard", "/dashboard",
+                        "http://testserver:invalid/dashboard", "http://[invalid", "null"):
+            cases.append(("GET", {"Referer": invalid}, False))
+        for method, headers, expected in cases:
+            with self.subTest(method=method, headers=headers):
+                request = Request({"type": "http", "method": method, "scheme": "http",
+                                   "server": ("testserver", 80), "path": "/admin/oauth/poll", "query_string": b"",
+                                   "headers": [(key.lower().encode(), value.encode()) for key, value in headers.items()]})
+                self.assertIs(same_origin(request), expected)
+
+    def test_lan_oauth_poll_uses_referer_without_disabling_csrf(self):
+        origin = "http://192.168.1.10:8787"
+        client = self.enterContext(TestClient(self.app, base_url=origin))
+        login = client.post("/admin/session", headers={"Origin": origin}, json={"api_key": "synthetic-key"})
+        self.assertEqual(login.status_code, 200, login.text)
+        token = login.json()["csrf_token"]
+        started = client.post("/admin/oauth/start", headers={"Origin": origin, "X-CSRF-Token": token})
+        self.assertEqual(started.status_code, 200, started.text)
+        params = {"login_id": started.json()["login_id"]}
+        referer = origin + "/dashboard/credentials"
+        rejected = [
+            {"Referer": referer},
+            {"Referer": referer, "X-CSRF-Token": "wrong"},
+            {"Referer": "http://evil.invalid/dashboard", "X-CSRF-Token": token},
+            {"Referer": referer, "X-CSRF-Token": token, "Sec-Fetch-Site": "cross-site"},
+        ]
+        for headers in rejected:
+            with self.subTest(headers=headers):
+                self.assertEqual(client.get("/admin/oauth/poll", params=params, headers=headers).status_code, 403)
+        other = self.enterContext(TestClient(self.app, base_url=origin))
+        other_login = other.post("/admin/session", headers={"Origin": origin}, json={"api_key": "synthetic-key"})
+        self.assertEqual(other_login.status_code, 200)
+        response = other.get("/admin/oauth/poll", params=params, headers={
+            "Referer": referer, "X-CSRF-Token": other_login.json()["csrf_token"]})
+        self.assertEqual(response.status_code, 404)
+        self.gateway._OAUTH.poll.assert_not_called()
+        self.gateway._save_oauth_credential.assert_not_called()
+        response = client.get("/admin/oauth/poll", params=params, headers={"Referer": referer, "X-CSRF-Token": token})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["imported"], "first.info")
+        self.assertTrue(self.auth.csrf_enabled())
+        self.gateway._OAUTH.poll.assert_called_once()
+        self.gateway._save_oauth_credential.assert_called_once()
 
     def test_admin_csrf_defaults_to_enabled_and_requires_explicit_false(self):
         self.assertTrue(self.auth.csrf_enabled())

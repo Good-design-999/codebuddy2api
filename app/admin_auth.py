@@ -22,16 +22,26 @@ def error_response(status, message):
 
 def same_origin(request):
     origin = request.headers.get("origin")
-    if not origin:
-        # Browsers often omit Origin on same-origin GET; CSRF is still required for OAuth polling.
-        return request.method in ("GET", "HEAD") and request.headers.get("sec-fetch-site") == "same-origin"
+    reference = origin
+    if origin is None:
+        if request.method not in ("GET", "HEAD"):
+            return False
+        site = request.headers.get("sec-fetch-site")
+        if site is not None:
+            return site == "same-origin"
+        # Plain-HTTP browsers may omit Fetch Metadata; OAuth polling still requires CSRF.
+        reference = request.headers.get("referer")
+        if not reference:
+            return False
     try:
-        supplied = urlsplit(origin)
+        supplied = urlsplit(reference)
         target = urlsplit(str(request.url))
-        return (supplied.scheme in ("http", "https") and not supplied.username and not supplied.password
-                and not supplied.path and not supplied.query and not supplied.fragment
-                and (supplied.scheme, supplied.hostname, supplied.port or (443 if supplied.scheme == "https" else 80))
-                == (target.scheme, target.hostname, target.port or (443 if target.scheme == "https" else 80)))
+        supplied_port = supplied.port if supplied.port is not None else (443 if supplied.scheme == "https" else 80)
+        target_port = target.port if target.port is not None else (443 if target.scheme == "https" else 80)
+        return (supplied.scheme in ("http", "https") and supplied.username is None and supplied.password is None
+                and not supplied.fragment
+                and (origin is None or (not supplied.path and not supplied.query))
+                and (supplied.scheme, supplied.hostname, supplied_port) == (target.scheme, target.hostname, target_port))
     except ValueError:
         return False
 

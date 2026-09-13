@@ -65,7 +65,9 @@ Management requires an API key. The WebUI exchanges that key for an HttpOnly man
 
 ### Management Origin / CSRF switch
 
-Enabled by default. To disable it in a trusted local environment, append `--admin-csrf false` to the existing startup command or set this in your existing `.env`:
+Enabled by default. When OAuth polling omits both `Origin` and `Sec-Fetch-Site`, a same-origin `Referer` (matching scheme, host and port) is accepted, but a valid CSRF token is still required. An existing `Origin` takes precedence; without it, supplied Fetch Metadata must be `same-origin` and cannot fall back to Referer. Login and writes still require Origin.
+
+Normal same-origin access does not require disabling protection. If errors persist, use a consistent access URL, check the proxy's forwarded Host/scheme, and refresh the page and log in again. Only for trusted local deployments, append `--admin-csrf false` to the startup command or set this in your existing `.env`:
 
 ```dotenv
 CODEBUDDY2API_ADMIN_CSRF=false

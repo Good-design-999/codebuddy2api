@@ -65,7 +65,9 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 
 ### 管理 Origin / CSRF 开关
 
-默认开启。在受信任本地环境需要关闭时，在原启动命令追加 `--admin-csrf false`，或在已有 `.env` 中设置：
+默认开启。OAuth 轮询在 `Origin`、`Sec-Fetch-Site` 均缺失时，兼容同源 `Referer`（协议、主机、端口一致），仍要求有效 CSRF token。已有 `Origin` 优先校验；无 `Origin` 但有 Fetch Metadata 时，只接受 `same-origin`，不会再用 Referer 回退。登录和写操作仍要求 Origin。
+
+正常同源访问不需要关闭保护。若仍报错，先统一访问地址、检查反代传递的 Host 和协议，并刷新页面重新登录。仅在受信任本地环境需要关闭时，在原启动命令追加 `--admin-csrf false`，或在已有 `.env` 中设置：
 
 ```dotenv
 CODEBUDDY2API_ADMIN_CSRF=false
