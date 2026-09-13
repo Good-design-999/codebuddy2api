@@ -175,6 +175,38 @@ def test_oauth_full_flow():
     print("✅ test_oauth_full_flow")
 
 
+def test_oauth_international_states_keep_their_own_host():
+    hosts = {"intl": "www.workbuddy.ai", "intl-codebuddy": "www.codebuddy.ai"}
+    routes = {}
+    for site, host in hosts.items():
+        prefix = f"https://{host}/v2/plugin"
+        routes[f"{prefix}/auth/state"] = {"code": 0, "data": {"state": site}}
+        routes[f"{prefix}/auth/token?state={site}"] = {"code": 0, "data": {
+            "accessToken": _jwt(f"https://{host}/auth/realms/copilot"), "domain": host}}
+        routes[f"{prefix}/login/account?state={site}"] = {"code": 0, "data": {"uid": "same-user"}}
+    manager = _manager(routes)
+    work = manager.start("intl")
+    cli = manager.start(" INTL-CODEBUDDY ")
+    assert work["verification_uri"] == "https://www.workbuddy.ai/login?state=intl"
+    assert cli["verification_uri"] == "https://www.codebuddy.ai/login?state=intl-codebuddy"
+    assert _FakeClient.calls == [
+        ("POST", "https://www.workbuddy.ai/v2/plugin/auth/state?platform=workbuddy"),
+        ("POST", "https://www.codebuddy.ai/v2/plugin/auth/state?platform=CLI"),
+    ]
+    for site, started, profile in (("intl-codebuddy", cli, "intl-cli"), ("intl", work, "intl-work")):
+        result = manager.poll(started["login_id"])
+        assert result["done"] and validate_cred_data(result["cred"]) == ("same-user", None)
+        assert auth_oauth.profile_for_auth(result["cred"]["auth"]) == profile
+        prefix = f"https://{hosts[site]}/v2/plugin"
+        assert _FakeClient.calls[-2:] == [("GET", f"{prefix}/auth/token?state={site}"),
+                                       ("GET", f"{prefix}/login/account?state={site}")]
+        assert _FakeClient.last_headers["X-Domain"] == hosts[site]
+        count = len(_FakeClient.calls)
+        assert manager.poll(started["login_id"]) == result
+        assert len(_FakeClient.calls) == count
+    print("test_oauth_international_states_keep_their_own_host passed")
+
+
 def test_oauth_edge_cases():
     m = _manager({"/auth/state": {"code": 0, "data": {"state": "s", "authUrl": "https://x/qr"}},
                   "/auth/token": {"code": 0, "data": {"accessToken": "at"}},
@@ -314,6 +346,7 @@ if __name__ == "__main__":
     test_build_auth_file()
     test_merge_existing_accounts()
     test_oauth_full_flow()
+    test_oauth_international_states_keep_their_own_host()
     test_oauth_edge_cases()
     test_keepalive_refresh()
     test_oauth_endpoint_import()

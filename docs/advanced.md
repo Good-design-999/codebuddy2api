@@ -67,7 +67,7 @@ Use a source/image build and Compose configuration containing this feature; recr
 | `POST /admin/credentials` | Import an `.info` file from the server's controlled directory |
 | `DELETE /admin/credentials/{name}` | Delete the credential file by filename; returns 409 while referenced by model bindings |
 | `PATCH /admin/credentials/{id}` | Enable/disable by account identity ID, without deleting files |
-| `POST /admin/oauth/start` · `GET /admin/oauth/poll` | Start and poll browser login |
+| `POST /admin/oauth/start` · `GET /admin/oauth/poll` | Start/poll login; `site=cn` (default), `intl` (international WorkBuddy) or `intl-codebuddy` (international CodeBuddy) |
 | `GET /admin/credits` · `POST /admin/checkin` | Inspect credits; trigger check-in and credit synchronization |
 
 Pages use `/dashboard/*`, management APIs use `/admin/*`, and clients retain `/v1/*`. `/cn` and `/intl` API prefixes are not registered. Automatic model routing requires no client URL changes.

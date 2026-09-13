@@ -67,11 +67,12 @@ uv run --env-file .env converter.py --desensitize
 ```bash
 uv run --env-file .env converter.py login
 uv run --env-file .env converter.py login --site intl --no-browser
+uv run --env-file .env converter.py login --site intl-codebuddy --no-browser
 ```
 
-第一条默认国内站；`--site intl` 选择国际站，`--no-browser` 只显示链接，可在其他设备打开扫码。网页显示登录成功后，仍需等待终端确认「账号已保存」。链接 10 分钟内有效，`Ctrl+C` 可取消。
+第一条默认国内站；`--site intl` 登录国际 WorkBuddy（`www.workbuddy.ai`），`--site intl-codebuddy` 登录国际 CodeBuddy（`www.codebuddy.ai`）。`--no-browser` 只显示链接，可在其他设备打开扫码。网页显示登录成功后，仍需等待终端确认「账号已保存」。链接 10 分钟内有效，`Ctrl+C` 可取消。
 
-Docker 中使用 `docker compose exec codebuddy2api python3 converter.py login --no-browser`，国际账号追加 `--site intl`。
+Docker 中使用 `docker compose exec codebuddy2api python3 converter.py login --no-browser`，国际账号按产品追加 `--site intl` 或 `--site intl-codebuddy`；镜像需包含对应入口。
 
 登录与服务必须使用同一 `CODEBUDDY_AUTH_DIR`。默认目录扫描模式下，新账号会自动加载；重复登录同一身份更新其凭证。以 `--auth-file` 启动时只使用指定文件。
 

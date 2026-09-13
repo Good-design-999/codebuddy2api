@@ -67,11 +67,12 @@ When the WebUI is unavailable, browser login also works without starting the ser
 ```bash
 uv run --env-file .env converter.py login
 uv run --env-file .env converter.py login --site intl --no-browser
+uv run --env-file .env converter.py login --site intl-codebuddy --no-browser
 ```
 
-The first command uses the domestic site. `--site intl` selects the international site; `--no-browser` prints a link you can open on another device. Even after the browser reports success, wait for the terminal to confirm that credentials were saved. Links expire after 10 minutes; press `Ctrl+C` to cancel.
+The first command uses the domestic site. `--site intl` selects international WorkBuddy (`www.workbuddy.ai`); `--site intl-codebuddy` selects international CodeBuddy (`www.codebuddy.ai`). `--no-browser` prints a link you can open on another device. Even after the browser reports success, wait for the terminal to confirm that credentials were saved. Links expire after 10 minutes; press `Ctrl+C` to cancel.
 
-In Docker, use `docker compose exec codebuddy2api python3 converter.py login --no-browser`; append `--site intl` for international accounts.
+In Docker, use `docker compose exec codebuddy2api python3 converter.py login --no-browser`; append `--site intl` or `--site intl-codebuddy` for the selected international product. The image must include the corresponding login option.
 
 Login and the server must use the same `CODEBUDDY_AUTH_DIR`. Default directory scanning loads new accounts automatically; logging in again updates the same identity. A server started with `--auth-file` only uses the specified files.
 

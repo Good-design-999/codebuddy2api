@@ -2675,7 +2675,7 @@ def main():
     ap.add_argument("command", nargs="?", choices=("serve", "login"), default="serve",
                     help="serve 启动服务（默认）；login 扫码登录、自动轮询并保存账号")
     ap.add_argument("--site", choices=tuple(auth_oauth.SITE_HOSTS), default="cn",
-                    help="login 使用的站点：cn 国内站（默认），intl 国际站")
+                    help="login 站点：cn 国内站（默认）；intl 国际 WorkBuddy；intl-codebuddy 国际 CodeBuddy")
     ap.add_argument("--no-browser", action="store_true",
                     help="login 仅显示授权链接，不自动打开浏览器（服务器/容器环境）")
     ap.add_argument("--host", default="127.0.0.1")

@@ -2,7 +2,7 @@
 """auth_oauth.py — WorkBuddy/CodeBuddy 无感登录采集（OAuth state 轮询）与凭据入库校验。
 
 无感登录采集流程（OAuth state 轮询 + 入库严格校验）：
-  1. POST {apiHost}/v2/plugin/auth/state?platform=workbuddy 申请 state + 授权链接
+  1. POST {apiHost}/v2/plugin/auth/state?platform=... 申请 state + 授权链接
   2. 用户在浏览器完成扫码授权（桌面端全程不退出、无需安装）
   3. 轮询 GET /v2/plugin/auth/token?state=... 拿 accessToken
   4. GET /v2/plugin/login/account?state=... 拉账号信息，拼成官方 .info 结构入库
@@ -32,6 +32,7 @@ REQUEST_TIMEOUT_S = 15.0
 SITE_HOSTS = {
     "cn": "https://www.codebuddy.cn",
     "intl": "https://www.workbuddy.ai",
+    "intl-codebuddy": "https://www.codebuddy.ai",
 }
 
 # 入库站点白名单：auth.domain 或 access token 的 JWT issuer 命中其一才收
@@ -209,12 +210,15 @@ class OAuthManager:
             self._states.pop(k, None)
 
     def start(self, site: str = "cn") -> dict:
-        """第一步：申请 state + 授权链接。site 仅支持 cn / intl。"""
-        host = SITE_HOSTS.get(str(site or "").strip().lower())
+        """申请 state 与授权链接；intl 保留为国际 WorkBuddy，intl-codebuddy 为国际 CodeBuddy。"""
+        site = str(site or "").strip().lower()
+        host = SITE_HOSTS.get(site)
         if not host:
-            raise ValueError(f"未知站点: {site}（仅支持 cn / intl）")
+            raise ValueError(f"未知站点（仅支持 {' / '.join(SITE_HOSTS)}）")
+        # 官方 CodeBuddy CLI 的 platform 为大写 CLI；旧入口保留兼容参数。
+        platform = "CLI" if site == "intl-codebuddy" else "workbuddy"
         with self._client() as c:
-            r = c.post(f"{host}{PLUGIN_PREFIX}/auth/state?platform=workbuddy",
+            r = c.post(f"{host}{PLUGIN_PREFIX}/auth/state?platform={platform}",
                        headers=self._headers(), json={})
             resp = r.json()
         data = resp.get("data") or {} if isinstance(resp, dict) else {}

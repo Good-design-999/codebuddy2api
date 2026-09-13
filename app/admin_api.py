@@ -114,8 +114,8 @@ def install_admin(app, config, gateway):
                     del oauth_tasks[task_id]
             if request.url.path == "/admin/oauth/start":
                 site = request.query_params.get("site", "cn")
-                if site not in ("cn", "intl"):
-                    return error_response(400, "OAuth 站点必须为 cn 或 intl")
+                if site not in auth_oauth.SITE_HOSTS:
+                    return error_response(400, f"OAuth 站点必须为 {'、'.join(auth_oauth.SITE_HOSTS)}")
                 if len(oauth_tasks) >= 256:
                     return error_response(429, "OAuth 任务过多，请稍后重试")
                 try:

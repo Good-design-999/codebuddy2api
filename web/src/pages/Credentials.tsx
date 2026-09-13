@@ -115,7 +115,8 @@ function OAuth({ onClose, onDone }: { onClose: () => void; onDone: () => void })
         登录站点
         <select value={site} disabled={!!login || busy} onChange={(e) => setSite(e.target.value)}>
           <option value="cn">中国大陆 · CN</option>
-          <option value="intl">国际 · INTL</option>
+          <option value="intl">国际 · WorkBuddy</option>
+          <option value="intl-codebuddy">国际 · CodeBuddy</option>
         </select>
       </label>
       <ErrorNotice message={error} />

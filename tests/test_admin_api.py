@@ -433,11 +433,31 @@ class AdminApiTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
             self.assertEqual(archive.namelist(), ["0.info", "1.info"])
 
+    def test_oauth_international_products_are_selectable_without_arbitrary_hosts(self):
+        sites = {"cn": "www.codebuddy.cn", "intl": "www.workbuddy.ai", "intl-codebuddy": "www.codebuddy.ai"}
+        for site, host in sites.items():
+            with self.subTest(site=site):
+                uri = f"https://{host}/login"
+                self.gateway._OAUTH.start.return_value = {"login_id": site, "verification_uri": uri}
+                response = self.client.post("/admin/oauth/start", params={"site": site}, headers=self.headers)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["verification_uri"], uri)
+                self.gateway._OAUTH.start.assert_called_with(site=site)
+        self.gateway._OAUTH.start.reset_mock()
+        for site in ("", "codebuddy", "https://www.codebuddy.ai", "https://evil.invalid"):
+            with self.subTest(invalid=site):
+                response = self.client.post("/admin/oauth/start", params={"site": site}, headers=self.headers)
+                self.assertEqual(response.status_code, 400)
+        self.gateway._OAUTH.start.assert_not_called()
+
     def test_oauth_binding_csrf_idempotence_and_whitelist(self):
+        self.gateway._OAUTH.start.return_value = {
+            "login_id": "task", "verification_uri": "https://www.codebuddy.ai/login"}
         csrf = self.login()
-        response = self.client.post("/admin/oauth/start", headers=csrf)
+        response = self.client.post("/admin/oauth/start?site=intl-codebuddy", headers=csrf)
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["verification_uri"], "https://www.codebuddy.cn/login")
+        self.assertEqual(response.json()["verification_uri"], "https://www.codebuddy.ai/login")
+        self.gateway._OAUTH.start.assert_called_once_with(site="intl-codebuddy")
         self.assertEqual(self.client.get("/admin/oauth/poll?login_id=task").status_code, 403)
         self.assertEqual(self.client.get("/admin/oauth/poll?login_id=task", headers={
             "X-CSRF-Token": csrf["X-CSRF-Token"]}).status_code, 403)
