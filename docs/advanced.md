@@ -18,7 +18,8 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 | `--auth-file` | scan `auth/` | Explicit credential file, repeatable; disables scanning other files |
 | `--log` | none | Additional text logs, 50 MiB rotation and 2 backups; SQLite auditing remains enabled |
 | `--desensitize` | off | Adapt fixed CLI templates, compact runtime prompts and mask keywords with zero-width characters |
-| `--no-compact` | off | With desensitization, retain fuller instructions while adapting templates and pruning metadata; does not disable Responses projection |
+| `--no-compact` | off | With desensitization, retain fuller instructions while adapting templates and pruning runtime context; does not disable Responses projection |
+| `--keep-tool-metadata [true/false]` | `false` | Retain tool descriptions and parameter-schema `description/title`, independently of prompt compaction |
 | `--skip-check` | off | Skip startup preflight |
 | `--credit-price-cny` | `0.014` | Domestic CNY per credit for billing conversion |
 | `--credit-price-usd` | `0.03` | International USD per credit for billing conversion |
@@ -31,9 +32,19 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 | `--max-request-bytes` | `33554432` | Positive byte limit for the processed upstream JSON |
 | `--log-body-limit` | `65536` | Text-log body preview bytes; `0` logs summaries only, not the SQLite diagnostic budget |
 
-Environment variables include `CODEBUDDY_AUTH_DIR`, `CODEBUDDY_IMPORT_DIR`, `CODEBUDDY2API_KEY`, `CODEBUDDY2API_ADMIN_CSRF`, `CODEBUDDY2API_LOG`, `CODEBUDDY2API_MAX_IMAGES`, `CODEBUDDY2API_IMAGE_POLICY`, `CODEBUDDY2API_MAX_REQUEST_BYTES`, `CODEBUDDY2API_LOG_BODY_LIMIT` and `CODEBUDDY2API_AUTO_TRIAL`. See [deployment](deployment.md) for startup examples.
+Environment variables include `CODEBUDDY_AUTH_DIR`, `CODEBUDDY_IMPORT_DIR`, `CODEBUDDY2API_KEY`, `CODEBUDDY2API_ADMIN_CSRF`, `CODEBUDDY2API_KEEP_TOOL_METADATA`, `CODEBUDDY2API_LOG`, `CODEBUDDY2API_MAX_IMAGES`, `CODEBUDDY2API_IMAGE_POLICY`, `CODEBUDDY2API_MAX_REQUEST_BYTES`, `CODEBUDDY2API_LOG_BODY_LIMIT` and `CODEBUDDY2API_AUTO_TRIAL`. See [deployment](deployment.md) for startup examples.
 
 Trial-credit claims are off by default and only apply to upstream-eligible `intl-work` accounts. Successful/already-claimed results persist per account in `auth/trial-ledger.json`. Failures wait at least 24 hours without immediate POST replay; eligibility and amounts are determined upstream. Keep this file when upgrading.
+
+### Tool metadata retention
+
+Off by default, preserving the existing policy: desensitization strips tool descriptions, and Responses tool projection also strips them; `--no-compact` does not change this. When enabled, Chat, Responses and Messages retain supported tool descriptions and string `description/title` annotations in parameter schemas. With desensitization enabled, retained text is still processed. Prompt compaction and existing content-filter retry conditions/counts are unchanged; fallback processing also respects this option.
+
+- **WebUI:** Settings → Keep tool descriptions; unlocked changes apply immediately and persist.
+- **CLI:** append `--keep-tool-metadata` or `--keep-tool-metadata true` to the existing command; explicit `false` overrides the environment.
+- **Environment:** set `CODEBUDDY2API_KEEP_TOOL_METADATA=true`. Compose passes it only when set, leaving the WebUI unlocked otherwise. Remove or comment out the variable to remove the environment lock; do not set an empty string.
+
+Use a source/image build and Compose configuration containing this feature; recreate containers after changing their environment. Retained descriptions may increase input tokens and content-filter rejections; compatibility across accounts/models is not guaranteed. Set `false` to restore the previous policy. This option does not restore other schema fields or deep nodes removed by existing Responses projection, nor relax the request-size budget.
 
 ## APIs and authentication
 

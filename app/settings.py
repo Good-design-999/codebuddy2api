@@ -28,6 +28,7 @@ SCHEMA = {
     "log_path": _item(None, "path", "兼容文本日志", mode="startup", env="CODEBUDDY2API_LOG", sensitive=True),
     "desensitize": _item(False, "boolean", "提示词脱敏"),
     "no_compact": _item(False, "boolean", "保留提示词全文"),
+    "keep_tool_metadata": _item(False, "boolean", "保留工具描述", env="CODEBUDDY2API_KEEP_TOOL_METADATA"),
     "skip_check": _item(False, "boolean", "跳过启动预检", mode="restart"),
     "credit_price_cny": _item(0.014, "number", "国内积分单价", minimum=0),
     "usd_rate": _item(7.15, "number", "美元人民币折算率", minimum=0.000001),

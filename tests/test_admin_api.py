@@ -316,6 +316,26 @@ class AdminApiTests(unittest.TestCase):
         self.gateway._save_oauth_credential.assert_not_called()
 
 
+    def test_tool_metadata_setting_is_hot_persisted_and_respects_locks(self):
+        key = "keep_tool_metadata"
+        current = self.client.get("/admin/settings", headers=self.headers).json()
+        item = next(item for item in current["items"] if item["key"] == key)
+        self.assertEqual((item["value"], item["locked"], item["mode"]), (False, False, "hot"))
+        response = self.client.patch("/admin/settings", headers=self.headers, json={
+            "revision": current["revision"], "values": {key: True}})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIs(self.config[key], True)
+        self.assertIs(self.store.snapshot()["settings"][key], True)
+        self.gateway.admin_apply_settings.assert_called_once_with({key: True})
+        item = next(item for item in response.json()["items"] if item["key"] == key)
+        self.assertEqual((item["value"], item["source"], item["locked"]), (True, "management", False))
+        self.config["settings_sources"][key] = "environment"
+        response = self.client.patch("/admin/settings", headers=self.headers, json={
+            "revision": response.json()["revision"], "values": {key: False}})
+        self.assertEqual(response.status_code, 400)
+        self.assertIs(self.config[key], True)
+        self.assertIs(self.store.snapshot()["settings"][key], True)
+
     def test_settings_revision_locked_sources_and_secret_redaction(self):
         self.config["auth_dir"] = "/private-directory"
         self.config["settings_sources"] = {"max_images": "environment"}

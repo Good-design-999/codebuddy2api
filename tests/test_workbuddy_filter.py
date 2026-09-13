@@ -201,6 +201,32 @@ class EndpointFilterTests(unittest.TestCase):
                     self.attempts.assert_any_call("content_filter_retry", error_code="content_filter")
                     self.assertFalse(any(REFUSAL in call.args[0] for call in self.logs.call_args_list))
 
+    def test_kept_metadata_survives_existing_filter_retry_without_expanding_it(self):
+        description = "Inspect files inside the sandbox."
+        for route in ROUTES:
+            for no_compact in (False, True):
+                for stream in (False, True):
+                    with self.subTest(route=route, no_compact=no_compact, stream=stream):
+                        self.reset()
+                        converter.CONFIG.update(keep_tool_metadata=True, no_compact=no_compact)
+                        self.respond = lambda req: reply() if len(self.requests) == 1 else httpx.Response(
+                            200, content=sse(event({"tool_calls": [TOOL]}, "tool_calls")))
+                        body = payload(route, stream=stream, tools=True)
+                        tool = body["tools"][0].get("function", body["tools"][0])
+                        tool["description"] = description
+                        schema = tool.get("parameters", tool.get("input_schema"))
+                        schema["title"] = "Inspection inputs"
+                        response = self.client.post(route, json=body)
+                        self.assertEqual(response.status_code, 200, response.text)
+                        self.assertEqual(len(self.requests), 2 if no_compact and not stream else 1)
+                        for request in self.requests:
+                            sent = json.loads(request.content)["tools"][0]["function"]
+                            self.assertEqual(sent["description"].replace("\u200b", ""), description)
+                            self.assertIn("\u200b", sent["description"])
+                            self.assertEqual(sent["parameters"]["title"], "Inspection inputs")
+                        self.credentials.assert_called_once()
+                        self.credential_status.assert_not_called()
+
     def test_all_streams_detect_refusal_without_replay_even_with_required_tools(self):
         for route in ROUTES:
             for tools in (False, True):

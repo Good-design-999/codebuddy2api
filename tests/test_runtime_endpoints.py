@@ -14,6 +14,8 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
+from itertools import product
+
 import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -73,6 +75,58 @@ class EndpointTests(unittest.TestCase):
     def handle(self, request):
         self.requests.append(request)
         return self.respond(request)
+
+    def test_tool_metadata_policy_reaches_all_protocols(self):
+        description = "Read sandbox data without destructive changes."
+        schema = {"type": "object", "title": "Lookup inputs", "properties": {
+            "path": {"type": "string", "title": "Data path", "description": description, "enum": ["sandbox", "local"]}},
+            "required": ["path"]}
+        function = {"name": "lookup_data", "description": description, "parameters": schema}
+        for route, keep, desensitize, no_compact, stream in product(ROUTES, (False, True), (False, True), (False, True), (False, True)):
+            with self.subTest(route=route, keep=keep, desensitize=desensitize, no_compact=no_compact, stream=stream):
+                converter.CONFIG.update(keep_tool_metadata=keep, desensitize=desensitize, no_compact=no_compact)
+                payload = payload_for(route, 0, stream)
+                if route == "/v1/messages":
+                    payload["tools"] = [{"name": function["name"], "description": description, "input_schema": schema}]
+                elif route == "/v1/responses":
+                    payload["tools"] = [{"type": "function", **function}]
+                else:
+                    payload["tools"] = [{"type": "function", "function": function}]
+                self.requests.clear()
+                response = self.client.post(route, json=payload)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(len(self.requests), 1)
+                sent = json.loads(self.requests[0].content)["tools"][0]["function"]
+                retained = keep or (not desensitize and route != "/v1/responses")
+                self.assertEqual("description" in sent, retained)
+                self.assertEqual("title" in sent["parameters"], retained)
+                prop = sent["parameters"]["properties"]["path"]
+                self.assertEqual("description" in prop, retained)
+                self.assertEqual("title" in prop, retained)
+                self.assertEqual(sent["name"], function["name"])
+                self.assertEqual(sent["parameters"]["required"], ["path"])
+                self.assertEqual(prop["enum"], ["sandbox", "local"])
+                if retained:
+                    self.assertEqual(sent["description"].replace("\u200b", ""), description)
+                    self.assertEqual("\u200b" in sent["description"], desensitize)
+
+    def test_kept_tool_descriptions_still_obey_request_size_budget(self):
+        converter.CONFIG.update(keep_tool_metadata=True, desensitize=True, max_request_bytes=2048)
+        for route in ROUTES:
+            with self.subTest(route=route):
+                payload = payload_for(route, 0, False)
+                function = {"name": "lookup_data", "description": "x" * 4096, "parameters": {"type": "object"}}
+                if route == "/v1/messages":
+                    payload["tools"] = [{"name": function["name"], "description": function["description"], "input_schema": function["parameters"]}]
+                elif route == "/v1/responses":
+                    payload["tools"] = [{"type": "function", **function}]
+                else:
+                    payload["tools"] = [{"type": "function", "function": function}]
+                response = self.client.post(route, json=payload)
+                self.assertEqual(response.status_code, 413, response.text)
+                self.assertEqual(response.json()["detail"]["error"]["code"], "request_too_large")
+        self.credentials.assert_not_called()
+        self.assertFalse(self.requests)
 
     def test_default_truncates_to_newest_16_for_all_routes_and_stream_flags(self):
         for route in ROUTES:
@@ -378,17 +432,19 @@ class ConfigurationTests(unittest.TestCase):
             converter.main()
             server.assert_called_once()
             return {key: converter.CONFIG[key] for key in (
-                "max_images", "image_policy", "max_request_bytes", "log_body_limit", "admin_csrf")}
+                "max_images", "image_policy", "max_request_bytes", "log_body_limit", "admin_csrf", "keep_tool_metadata")}
 
     def test_defaults(self):
         self.assertEqual(self.configure(), {"max_images": 16, "image_policy": "truncate",
-                                           "max_request_bytes": 33554432, "log_body_limit": 65536, "admin_csrf": True})
+                                           "max_request_bytes": 33554432, "log_body_limit": 65536,
+                                           "admin_csrf": True, "keep_tool_metadata": False})
 
     def test_environment_and_explicit_cli_precedence(self):
         env = {"CODEBUDDY2API_MAX_IMAGES": "8", "CODEBUDDY2API_IMAGE_POLICY": "error",
                "CODEBUDDY2API_MAX_REQUEST_BYTES": "100000", "CODEBUDDY2API_LOG_BODY_LIMIT": "0"}
         self.assertEqual(self.configure(env), {"max_images": 8, "image_policy": "error",
-                                               "max_request_bytes": 100000, "log_body_limit": 0, "admin_csrf": True})
+                                               "max_request_bytes": 100000, "log_body_limit": 0,
+                                               "admin_csrf": True, "keep_tool_metadata": False})
         env["CODEBUDDY2API_IMAGE_POLICY"] = "invalid-overridden"
         self.assertEqual(self.configure(env, ("--max-images", "0", "--image-policy", "truncate"))["max_images"], 0)
 
@@ -405,6 +461,24 @@ class ConfigurationTests(unittest.TestCase):
         for env, flags, expected in cases:
             with self.subTest(env=env, flags=flags):
                 self.assertIs(self.configure(env, flags)["admin_csrf"], expected)
+
+    def test_tool_metadata_flag_and_environment_precedence(self):
+        key = "CODEBUDDY2API_KEEP_TOOL_METADATA"
+        cases = [
+            ({}, ("--keep-tool-metadata",), True),
+            ({}, ("--keep-tool-metadata", "false"), False),
+            ({key: "true"}, (), True),
+            ({key: "false"}, (), False),
+            ({key: "true"}, ("--keep-tool-metadata", "false"), False),
+            ({key: "false"}, ("--keep-tool-metadata", "true"), True),
+            ({key: "invalid-overridden"}, ("--keep-tool-metadata",), True),
+        ]
+        for env, flags, expected in cases:
+            with self.subTest(env=env, flags=flags):
+                self.assertIs(self.configure(env, flags)["keep_tool_metadata"], expected)
+        self.configure({key: "invalid"}, invalid=True)
+        self.configure({key: ""}, invalid=True)
+        self.configure(flags=("--keep-tool-metadata", "invalid"), invalid=True)
 
     def test_invalid_config_fails_before_side_effects(self):
         for env in ({"CODEBUDDY2API_MAX_IMAGES": "-1"}, {"CODEBUDDY2API_MAX_IMAGES": "1.5"},

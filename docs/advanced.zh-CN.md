@@ -18,7 +18,8 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 | `--auth-file` | 扫描 `auth/` | 指定凭据文件，可重复传入；不再扫描其他文件 |
 | `--log` | 无 | 额外文本日志，50 MiB 轮转、保留 2 份；不影响默认 SQLite 审计 |
 | `--desensitize` | 关 | 适配固定 CLI 模板、压缩运行时提示、零宽脱敏关键词 |
-| `--no-compact` | 关 | 配合脱敏保留主要行为指令，仍适配模板及裁剪元数据；不关闭 Responses 投影 |
+| `--no-compact` | 关 | 配合脱敏保留主要行为指令，仍适配模板及裁剪运行时上下文；不关闭 Responses 投影 |
+| `--keep-tool-metadata [true/false]` | `false` | 保留工具描述及参数 schema 的 `description/title`，与提示词压缩独立 |
 | `--skip-check` | 关 | 跳过启动预检 |
 | `--credit-price-cny` | `0.014` | 国内积分折算单价，元/Credit |
 | `--credit-price-usd` | `0.03` | 国际积分折算单价，美元/Credit |
@@ -31,9 +32,19 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 | `--max-request-bytes` | `33554432` | 处理后的上游 JSON 字节上限，须为正整数 |
 | `--log-body-limit` | `65536` | 兼容文本日志正文预览字节；`0` 只记摘要，不控制 SQLite 诊断预算 |
 
-环境变量包括 `CODEBUDDY_AUTH_DIR`、`CODEBUDDY_IMPORT_DIR`、`CODEBUDDY2API_KEY`、`CODEBUDDY2API_ADMIN_CSRF`、`CODEBUDDY2API_LOG`，以及 `CODEBUDDY2API_MAX_IMAGES`、`CODEBUDDY2API_IMAGE_POLICY`、`CODEBUDDY2API_MAX_REQUEST_BYTES`、`CODEBUDDY2API_LOG_BODY_LIMIT`、`CODEBUDDY2API_AUTO_TRIAL`。启动示例见 [部署指南](deployment.zh-CN.md)。
+环境变量包括 `CODEBUDDY_AUTH_DIR`、`CODEBUDDY_IMPORT_DIR`、`CODEBUDDY2API_KEY`、`CODEBUDDY2API_ADMIN_CSRF`、`CODEBUDDY2API_KEEP_TOOL_METADATA`、`CODEBUDDY2API_LOG`，以及 `CODEBUDDY2API_MAX_IMAGES`、`CODEBUDDY2API_IMAGE_POLICY`、`CODEBUDDY2API_MAX_REQUEST_BYTES`、`CODEBUDDY2API_LOG_BODY_LIMIT`、`CODEBUDDY2API_AUTO_TRIAL`。启动示例见 [部署指南](deployment.zh-CN.md)。
 
 体验积分领取默认关闭，仅适用于符合上游资格的 `intl-work` 账号。成功或已领取的结果按账号保存到 `auth/trial-ledger.json`，失败至少退避 24 小时，不立即重放 POST；资格与额度以上游为准，升级时保留该文件。
+
+### 工具描述保留
+
+默认关闭，沿用旧策略：启用脱敏会剥离工具描述，Responses 的工具投影也会剥离描述；`--no-compact` 不改变这一行为。开启后，Chat、Responses、Messages 保留已支持工具定义中的描述及参数 schema 的字符串 `description/title`。若启用脱敏，保留的文本仍会处理；提示词压缩、现有审核兜底条件与重试次数不变，兜底也遵守本开关。
+
+- **WebUI**：系统设置 → 保留工具描述，未被启动来源锁定时可立即生效并持久化。
+- **CLI**：在原启动命令追加 `--keep-tool-metadata` 或 `--keep-tool-metadata true`；显式 `false` 可覆盖环境变量。
+- **环境变量**：设置 `CODEBUDDY2API_KEEP_TOOL_METADATA=true`；Compose 会传入已设置的值，未设置时不锁定 WebUI。删除或注释变量可解除环境锁定，不要设为空串。
+
+需使用包含此功能的源码/镜像和 Compose 配置；修改容器环境后重新创建容器。保留描述可能增加输入 token 和审核拦截风险，不保证所有账号/模型都同样兼容；设为 `false` 可恢复旧策略。此开关不恢复 Responses 原有投影裁掉的其他 schema 字段或深层节点，也不放宽请求体预算。
 
 ## API 与鉴权
 

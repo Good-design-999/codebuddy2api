@@ -15,6 +15,7 @@ Management is locked without a key. After changing it, sign in again and restart
 - **Models:** enable models, set public IDs, regions/products and specific accounts. Unavailable bindings never fall back to unselected accounts. Clients use the IDs published here.
 - **Logs:** filter requests and inspect failed attempts. Clearing details keeps historical statistics.
 - **Settings:** edit unlocked options; hot changes apply immediately, while restart-marked settings require a manual restart. Change locked options in the startup configuration; see [configuration precedence](advanced.md).
+  - “Keep tool descriptions” is off by default and works across all three protocols, independently of prompt compaction; see [tool metadata retention](advanced.md#tool-metadata-retention) for configuration and limits.
 
 Clearing **all logs and statistics** is irreversible. Enter the confirmation text shown in the dialog and re-enter the current API key. This does not delete credentials or gateway settings.
 
