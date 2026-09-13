@@ -294,7 +294,13 @@ class AuditMiddleware:
 
         async def observed_receive():
             message = await receive()
-            if message.get("type") == "http.disconnect":
+            # Some ASGI servers (uvicorn) synthesise ``http.disconnect`` once the
+            # response is complete, because ``receive`` has nothing left to yield.
+            # Starlette's ``listen_for_disconnect`` helper, used for
+            # ``spec_version < 2.4`` servers, therefore always observes a trailing
+            # disconnect even for a fully delivered stream.  Only treat the event
+            # as a client abort when the body was still in flight.
+            if message.get("type") == "http.disconnect" and not observation.body_finished:
                 nonlocal cancelled
                 cancelled = True
             return message
