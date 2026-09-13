@@ -1203,7 +1203,7 @@ CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "max_request_bytes": 32 * 1024 * 1024, "log_body_limit": 65536,
                 "usage_daily": None,     # 官方用量明细（日期×模型 credit），供 billing/usage 出 daily_costs
                 "credit_price_cny": None, "credit_price_usd": None, "usd_rate": None,
-                "desensitize": False, "no_compact": False}  # 单价 None=取 credits 模块默认
+                "desensitize": False, "no_compact": False, "keep_tool_metadata": False}  # 单价 None=取 credits 模块默认
 
 # 无感登录状态机（内存态；重启后未完成的登录需重新发起）
 _OAUTH = auth_oauth.OAuthManager(user_agent=USER_AGENT)
@@ -2392,7 +2392,7 @@ def _chat_body_desensitize(body: dict, *, force_compact: bool = False) -> dict:
         desensitize_harness_user=True,
         desensitize_tools=True,
         compact_harness=(force_compact or not CONFIG.get("no_compact")),
-        strip_tool_metadata=True,
+        strip_tool_metadata=not CONFIG.get("keep_tool_metadata", False),
     )
 
 
@@ -2424,7 +2424,8 @@ async def create_response(request: Request,
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"request conversion error: {e}", "type": "invalid_request_error"}})
 
-    chat_body, projection_stats = project_responses_chat_body(chat_body)
+    chat_body, projection_stats = project_responses_chat_body(
+        chat_body, keep_tool_metadata=CONFIG.get("keep_tool_metadata", False))
     chat_body = _prepare_chat_body(chat_body)
 
     client_wants_stream = payload.get("stream", True)  # Codex CLI 默认 stream
@@ -2692,6 +2693,9 @@ def main():
     ap.add_argument("--no-compact", action="store_true",
                     help="配合 --desensitize 保留主要行为指令，仍适配固定模板并裁剪运行时元数据；"
                          "非流式纯审核拒绝最多压缩兜底一次。")
+    ap.add_argument("--keep-tool-metadata", type=_boolean_arg, nargs="?", const=True,
+                    default=os.environ.get("CODEBUDDY2API_KEEP_TOOL_METADATA", "false"),
+                    help="保留工具描述及参数 description/title；启用脱敏时仍处理描述文本，默认 false")
     ap.add_argument("--skip-check", action="store_true", help="跳过启动预检")
     ap.add_argument("--auth-file", action="append", default=[], metavar="PATH",
                     help="凭据文件（可重复传入组成凭证池；默认自动扫描 auth 目录全部 *.info）")

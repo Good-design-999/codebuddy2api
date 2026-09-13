@@ -109,6 +109,35 @@ class ControlStoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_settings(invalid)
 
+    def test_tool_metadata_persistence_precedence_and_locking(self):
+        key = "keep_tool_metadata"
+        env_key = "CODEBUDDY2API_KEEP_TOOL_METADATA"
+        defaults = {"control_store": self.store}
+        apply_persisted_settings(defaults, environ={})
+        self.assertIs(defaults[key], False)
+        initial = next(item for item in resolve_settings(defaults) if item["key"] == key)
+        self.assertFalse(initial["locked"])
+        self.assertEqual(initial["mode"], "hot")
+        self.store.update_settings({key: True}, 0)
+        reopened = ControlStore(self.path)
+        self.addCleanup(reopened.close)
+        for env, explicit, expected, source in (
+            ({}, (), True, "management"),
+            ({env_key: "false"}, (), False, "environment"),
+            ({env_key: "true"}, (key,), False, "cli"),
+        ):
+            with self.subTest(env=env, explicit=explicit):
+                config = {"control_store": reopened, key: False}
+                apply_persisted_settings(config, explicit=explicit, environ=env)
+                self.assertIs(config[key], expected)
+                item = next(item for item in resolve_settings(config) if item["key"] == key)
+                self.assertEqual(item["source"], source)
+                self.assertEqual(item["locked"], source != "management")
+                self.assertIs(item["stored"], True)
+        for invalid in ("true", 1, None):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_settings({key: invalid})
+
 
 if __name__ == "__main__":
     unittest.main()

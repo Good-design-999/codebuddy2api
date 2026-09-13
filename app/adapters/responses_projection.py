@@ -106,13 +106,13 @@ SCHEMA_KEEP_KEYS = {
 }
 
 
-def project_responses_chat_body(body: dict) -> tuple[dict, dict]:
+def project_responses_chat_body(body: dict, *, keep_tool_metadata: bool = False) -> tuple[dict, dict]:
     """把 Responses 转出来的 Chat body 投影成更适合腾讯后端的最小上下文。"""
     projected = dict(body)
     messages = list(body.get("messages") or [])
     tools = list(body.get("tools") or [])
 
-    projected_tools, tool_stats = _project_tools(tools)
+    projected_tools, tool_stats = _project_tools(tools, keep_tool_metadata=keep_tool_metadata)
     if projected_tools:
         projected["tools"] = projected_tools
     elif "tools" in projected:
@@ -396,7 +396,7 @@ def _shrink_json_value(value: Any, depth: int = 0, key: str = "") -> Any:
     return value
 
 
-def _project_tools(tools: list[dict]) -> tuple[list[dict], dict]:
+def _project_tools(tools: list[dict], *, keep_tool_metadata: bool = False) -> tuple[list[dict], dict]:
     projected = []
     original_chars = _tools_size(tools)
 
@@ -413,8 +413,13 @@ def _project_tools(tools: list[dict]) -> tuple[list[dict], dict]:
             continue
 
         projected_function: dict[str, Any] = {"name": name}
+        if keep_tool_metadata:
+            for key in ("description", "title"):
+                if isinstance(function.get(key), str):
+                    projected_function[key] = function[key]
         if "parameters" in function:
-            projected_function["parameters"] = _project_schema(function.get("parameters"))
+            projected_function["parameters"] = _project_schema(
+                function.get("parameters"), keep_tool_metadata=keep_tool_metadata)
         if "strict" in function:
             projected_function["strict"] = function.get("strict")
 
@@ -428,7 +433,7 @@ def _project_tools(tools: list[dict]) -> tuple[list[dict], dict]:
     }
 
 
-def _project_schema(schema: Any, depth: int = 0) -> Any:
+def _project_schema(schema: Any, depth: int = 0, *, keep_tool_metadata: bool = False) -> Any:
     if depth >= 6:
         return {"type": "object"}
 
@@ -436,24 +441,27 @@ def _project_schema(schema: Any, depth: int = 0) -> Any:
         out: dict[str, Any] = {}
         for key, value in schema.items():
             if key not in SCHEMA_KEEP_KEYS:
+                if keep_tool_metadata and key in ("description", "title") and isinstance(value, str):
+                    out[key] = value
                 continue
             if key == "properties" and isinstance(value, dict):
                 out["properties"] = {
-                    prop: _project_schema(prop_schema, depth + 1)
+                    prop: _project_schema(prop_schema, depth + 1, keep_tool_metadata=keep_tool_metadata)
                     for prop, prop_schema in value.items()
                 }
             elif key == "items":
-                out["items"] = _project_schema(value, depth + 1)
+                out["items"] = _project_schema(value, depth + 1, keep_tool_metadata=keep_tool_metadata)
             elif key in {"oneOf", "anyOf", "allOf"} and isinstance(value, list):
-                out[key] = [_project_schema(item, depth + 1) for item in value[:6]]
+                out[key] = [_project_schema(item, depth + 1, keep_tool_metadata=keep_tool_metadata) for item in value[:6]]
             elif key == "additionalProperties" and isinstance(value, dict):
-                out[key] = _project_schema(value, depth + 1)
+                out[key] = _project_schema(value, depth + 1, keep_tool_metadata=keep_tool_metadata)
             else:
                 out[key] = value
-        return out or {"type": "object"}
+        # Annotations must not change the historical empty-schema object fallback.
+        return out if any(key in SCHEMA_KEEP_KEYS for key in out) else {"type": "object", **out}
 
     if isinstance(schema, list):
-        return [_project_schema(item, depth + 1) for item in schema[:6]]
+        return [_project_schema(item, depth + 1, keep_tool_metadata=keep_tool_metadata) for item in schema[:6]]
 
     return schema
 

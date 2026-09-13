@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]  # 仓库根
 RUNTIME_DEFAULTS = {
     "max_images": 16, "image_policy": "truncate",
     "max_request_bytes": 33554432, "log_body_limit": 65536,
-    "admin_csrf": True,
+    "admin_csrf": True, "keep_tool_metadata": False,
 }
 API_ENDPOINTS = {
     "chat/completions": "POST", "responses": "POST", "messages": "POST",
@@ -80,6 +80,12 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(values["CODEBUDDY2API_IMAGE"], "codebuddy2api:local")
         self.assertEqual(values["CODEBUDDY2API_AUTO_TRIAL"], "false")
         self.assertEqual(values["CODEBUDDY2API_ADMIN_CSRF"], str(RUNTIME_DEFAULTS["admin_csrf"]).lower())
+        self.assertNotIn("CODEBUDDY2API_KEEP_TOOL_METADATA", values)
+
+    def test_tool_metadata_compose_environment_is_optional(self):
+        key = "CODEBUDDY2API_KEEP_TOOL_METADATA"
+        self.assertRegex((ROOT / "docker-compose.yml").read_text(), rf"(?m)^ +{key}: *$")
+        self.assertRegex((ROOT / ".env.example").read_text(), rf"(?m)^# {key}=(true|false)$")
 
     def test_docker_copies_and_allows_all_local_runtime_imports(self):
         files = docker_sources()
