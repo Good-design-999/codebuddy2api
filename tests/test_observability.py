@@ -77,6 +77,58 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
                 await send({"type": "http.response.body", "body": b"", "more_body": False})
         return await self.invoke(app, path=path)
 
+    async def test_trailing_disconnect_preserves_completed_stream_outcome(self):
+        cases = (
+            ("/v1/chat/completions", b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', "success"),
+            ("/v1/responses", b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n', "success"),
+            ("/v1/messages", b'data: {"type":"message_stop"}\n\n', "success"),
+            ("/v1/chat/completions", b'event: error\ndata: {"error":{"code":"upstream_timeout"}}\n\ndata: [DONE]\n\n', "error"),
+        )
+        for path, body, outcome in cases:
+            with self.subTest(path=path, outcome=outcome):
+                self.store.clear("all")
+                received = []
+                async def receive():
+                    message = {"type": "http.disconnect"}
+                    received.append(message)
+                    return message
+                async def app(scope, receive, send):
+                    await send({"type": "http.response.start", "status": 200,
+                                "headers": [(b"content-type", b"text/event-stream")]})
+                    await send({"type": "http.response.body", "body": body, "more_body": True})
+                    await send({"type": "http.response.body", "body": b"", "more_body": False})
+                    await receive()
+                sent = await self.invoke(app, path=path, receiver=receive)
+                self.assertEqual(received, [{"type": "http.disconnect"}])
+                self.assertEqual(sent[1]["body"], body)
+                self.assertFalse(sent[-1]["more_body"])
+                self.assertEqual(self.only_record()["outcome"], outcome)
+
+    async def test_disconnect_during_final_send_is_still_cancelled(self):
+        final_started, disconnected = asyncio.Event(), asyncio.Event()
+        async def receive():
+            await final_started.wait()
+            disconnected.set()
+            return {"type": "http.disconnect"}
+        async def send(message):
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                final_started.set()
+                await disconnected.wait()
+        async def app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"text/event-stream")]})
+            await send({"type": "http.response.body", "body": b"data: [DONE]\n\n", "more_body": True})
+            listener = asyncio.create_task(receive())
+            try:
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+                await listener
+            finally:
+                if not listener.done():
+                    listener.cancel()
+                await asyncio.gather(listener, return_exceptions=True)
+        await asyncio.wait_for(self.invoke(app, receiver=receive, sender=send), timeout=2)
+        self.assertEqual(self.only_record()["outcome"], "cancelled")
+
     async def test_first_effective_output_not_role_or_usage(self):
         async def app(scope, receive, send):
             await send({"type": "http.response.start", "status": 200,
