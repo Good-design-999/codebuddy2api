@@ -1935,6 +1935,16 @@ def _prepare_chat_body(body: dict, *, region=None) -> dict:
     if not isinstance(messages, list) or not messages or any(not isinstance(message, dict) for message in messages):
         raise HTTPException(status_code=400, detail={"error": {
             "message": "messages must be a non-empty array of objects", "type": "invalid_request_error"}})
+    # Upstream compatibility: gateways such as copilot.tencent.com and
+    # workbuddy.ai reject the "developer" role with 11128 "Illegal API
+    # invocation from an unapproved channel"; official clients only send
+    # "system". Normalize the role, keep the content, and do not mutate the
+    # caller's message dicts.
+    messages = [
+        dict(message, role="system") if message.get("role") == "developer" else message
+        for message in messages
+    ]
+    body["messages"] = messages
     if messages[0].get("role") != "system":
         system_index = next((index for index, message in enumerate(messages) if message.get("role") == "system"), None)
         if system_index is None:

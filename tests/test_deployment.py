@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # 仓库根：允�
 import ast
 import pathlib
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -166,24 +167,48 @@ class DeploymentTests(unittest.TestCase):
             self.assertIn("docker compose build", doc)
             self.assertNotRegex(doc, r"\bdocker-compose\s")
 
-    def test_readmes_keep_original_endpoints_and_sdk_roots_without_region_prefixes(self):
-        for filename in ("README.md", "README.zh-CN.md"):
-            with self.subTest(filename=filename):
-                doc = (ROOT / filename).read_text()
-                for suffix, method in API_ENDPOINTS.items():
-                    self.assertIn(f"{method} /v1/{suffix}", doc)
-                self.assertIn("`http://127.0.0.1:8787/v1`", doc)
-                self.assertIn('base_url = "http://127.0.0.1:8787/v1"', doc)
+    def test_readmes_link_guides_and_webui_setup(self):
+        for suffix in ("", ".zh-CN"):
+            with self.subTest(language=suffix):
+                readme = (ROOT / f"README{suffix}.md").read_text()
+                self.assertIn("http://127.0.0.1:8787/dashboard", readme)
+                self.assertIn("CODEBUDDY2API_KEY", readme)
+                for guide in ("webui", "deployment", "clients", "advanced"):
+                    target = f"docs/{guide}{suffix}.md"
+                    self.assertIn(f"]({target})", readme)
+                    self.assertTrue((ROOT / target).is_file(), target)
+
+    def test_docs_keep_original_endpoints_and_sdk_roots_without_region_prefixes(self):
+        for suffix in ("", ".zh-CN"):
+            with self.subTest(language=suffix):
+                readme = (ROOT / f"README{suffix}.md").read_text()
+                clients = (ROOT / f"docs/clients{suffix}.md").read_text()
+                advanced = (ROOT / f"docs/advanced{suffix}.md").read_text()
+                for endpoint, method in API_ENDPOINTS.items():
+                    self.assertIn(f"{method} /v1/{endpoint}", advanced)
+                self.assertIn("`http://127.0.0.1:8787/v1`", readme)
+                self.assertIn('base_url = "http://127.0.0.1:8787/v1"', clients)
                 for region in ("cn", "intl"):
-                    self.assertNotIn(f"http://127.0.0.1:8787/{region}", doc)
+                    self.assertNotIn(f"http://127.0.0.1:8787/{region}", readme + clients + advanced)
                     for product in ("cli", "work"):
-                        self.assertIn(f"`{region}-{product}`", doc)
-                self.assertIn("ANTHROPIC_BASE_URL=http://127.0.0.1:8787\n", doc)
-                self.assertNotIn("ANTHROPIC_BASE_URL=http://127.0.0.1:8787/v1", doc)
+                        self.assertIn(f"`{region}-{product}`", advanced)
+                self.assertIn("ANTHROPIC_BASE_URL=http://127.0.0.1:8787\n", clients)
+                self.assertNotIn("ANTHROPIC_BASE_URL=http://127.0.0.1:8787/v1", clients)
                 for host in ("copilot.tencent.com", "www.workbuddy.cn", "www.codebuddy.ai", "www.workbuddy.ai"):
-                    self.assertIn("https://" + host, doc)
-                self.assertIn("default-model", doc)
-                self.assertIn("account/tenant" if filename == "README.md" else "账号/租户", doc)
+                    self.assertIn("https://" + host, advanced)
+                self.assertIn("default-model", advanced)
+                self.assertIn("账号/租户" if suffix else "account/tenant", advanced)
+
+    def test_documentation_local_links_resolve(self):
+        paths = [ROOT / "README.md", ROOT / "README.zh-CN.md", *sorted((ROOT / "docs").glob("*.md"))]
+        for path in paths:
+            for target in re.findall(r"\[[^\]]+\]\(([^\s)]+)\)", path.read_text()):
+                if "://" in target or target.startswith(("mailto:", "#")):
+                    continue
+                linked = (path.parent / target.split("#", 1)[0]).resolve()
+                with self.subTest(document=path.relative_to(ROOT), target=target):
+                    self.assertTrue(linked.is_relative_to(ROOT), target)
+                    self.assertTrue(linked.is_file(), target)
 
 
 if __name__ == "__main__":
