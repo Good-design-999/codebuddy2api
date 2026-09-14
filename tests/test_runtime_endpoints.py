@@ -143,6 +143,29 @@ class EndpointTests(unittest.TestCase):
                                headers={"Content-Type": "application/json"})
         self.assertEqual(bad.status_code, 400)
 
+    def test_inference_errors_follow_the_client_protocol_shape(self):
+        """OpenAI 路由顶层 error；Anthropic 路由 error 对象；/admin 保持 detail 包装。"""
+        converter.CONFIG["api_key"] = "secret"
+        try:
+            for route in ("/v1/chat/completions", "/v1/responses"):
+                with self.subTest(route=route):
+                    response = self.client.post(route, json={})
+                    self.assertEqual(response.status_code, 401, response.text)
+                    body = response.json()
+                    self.assertIn("error", body)
+                    self.assertNotIn("detail", body)
+                    self.assertEqual(body["error"]["type"], "auth_error")
+            response = self.client.post("/v1/messages", json={})
+            self.assertEqual(response.status_code, 401, response.text)
+            body = response.json()
+            self.assertEqual(body["type"], "error")
+            self.assertEqual(body["error"]["type"], "authentication_error")
+            response = self.client.get("/admin/credentials")
+            self.assertEqual(response.status_code, 401, response.text)
+            self.assertIn("detail", response.json())
+        finally:
+            converter.CONFIG["api_key"] = ""
+
     def test_tool_metadata_policy_reaches_all_protocols(self):
         description = "Read sandbox data without destructive changes."
         schema = {"type": "object", "title": "Lookup inputs", "properties": {
@@ -191,7 +214,7 @@ class EndpointTests(unittest.TestCase):
                     payload["tools"] = [{"type": "function", "function": function}]
                 response = self.client.post(route, json=payload)
                 self.assertEqual(response.status_code, 413, response.text)
-                self.assertEqual(response.json()["detail"]["error"]["code"], "request_too_large")
+                self.assertEqual(response.json()["error"]["code"], "request_too_large")
         self.credentials.assert_not_called()
         self.assertFalse(self.requests)
 
@@ -221,7 +244,7 @@ class EndpointTests(unittest.TestCase):
                 with self.subTest(route=route, stream=stream):
                     response = self.client.post(route, json=payload_for(route, 17, stream))
                     self.assertEqual(response.status_code, 413)
-                    error = response.json()["detail"]["error"]
+                    error = response.json()["error"]
                     self.assertEqual((error["code"], error["image_count"], error["max_images"]),
                                      ("too_many_images", 17, 16))
         self.credentials.assert_not_called()
@@ -251,7 +274,7 @@ class EndpointTests(unittest.TestCase):
         payload["messages"][0]["content"][1]["image_url"]["url"] = "data:image/png;base64," + "A" * 2000
         response = self.client.post(ROUTES[0], json=payload)
         self.assertEqual(response.status_code, 413)
-        self.assertEqual(response.json()["detail"]["error"]["code"], "request_too_large")
+        self.assertEqual(response.json()["error"]["code"], "request_too_large")
         self.credentials.assert_not_called()
         self.assertFalse(self.requests)
 

@@ -41,6 +41,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler as _default_http_exception_handler
 from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 
@@ -1308,6 +1309,39 @@ PASSTHROUGH_BODY_KEYS = {
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="codebuddy2api", version=APP_VERSION)
+
+# Anthropic 错误类型映射：按 https://platform.claude.com/docs/en/api/errors 成形
+_ANTHROPIC_ERROR_TYPES = {
+    "auth_error": "authentication_error",
+    "rate_limit_error": "rate_limit_error",
+    "invalid_request_error": "invalid_request_error",
+    "not_found_error": "not_found_error",
+    "upstream_error": "api_error",
+}
+
+
+@app.exception_handler(HTTPException)
+async def _protocol_http_exception(request: Request, exc: HTTPException):
+    """推理端点（/v1/*）的错误体按客户端协议成形；/admin 与其他路由保持 FastAPI 默认 detail 包装。"""
+    path = request.url.path
+    if not path.startswith("/v1/"):
+        return await _default_http_exception_handler(request, exc)
+    detail = exc.detail
+    err = detail.get("error") if isinstance(detail, dict) else None
+    if not isinstance(err, dict):
+        err = {"message": str(detail), "type": "error"}
+    message = str(err.get("message") or "")
+    if path.startswith("/v1/messages"):
+        # Anthropic：{"type": "error", "error": {...}}；上游业务 code 原样保留，客户端仍可识别 content_filter
+        etype = _ANTHROPIC_ERROR_TYPES.get(str(err.get("type") or ""))
+        if etype is None:
+            etype = "api_error" if exc.status_code >= 500 else "invalid_request_error"
+        error_obj = {**err, "type": etype, "message": message}  # code/param/image_count 等结构化字段原样保留
+        return JSONResponse({"type": "error", "error": error_obj},
+                            status_code=exc.status_code, headers=exc.headers)
+    # OpenAI：顶层 error 对象，保留 param/code 等既有字段
+    body = {"error": {**err, "message": message}}
+    return JSONResponse(body, status_code=exc.status_code, headers=exc.headers)
 CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "admin_csrf": True,     # 管理 Origin/CSRF 校验，仅允许启动配置关闭
                 "models_remote": None,   # 国内站云端模型表（缓存或同步结果）

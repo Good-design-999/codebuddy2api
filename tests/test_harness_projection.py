@@ -347,7 +347,7 @@ class ResponsesEndpointTests(unittest.TestCase):
         converter.CONFIG["max_request_bytes"] = 1024
         response = self.post([{"role": "user", "content": TASK}])
         self.assertEqual(response.status_code, 413, response.text)
-        self.assertEqual(response.json()["detail"]["error"]["code"], "request_too_large")
+        self.assertEqual(response.json()["error"]["code"], "request_too_large")
         self.assertFalse(self.captured)
         self.credentials.assert_not_called()
 
