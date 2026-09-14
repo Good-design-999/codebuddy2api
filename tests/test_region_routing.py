@@ -126,9 +126,11 @@ class RegionRoutingTests(unittest.TestCase):
                                 model_guard=guard, model_cache=None, account_catalogs=None)
         converter.invalidate_model_table()
 
-    def account_catalogs(self, tables):
+    def account_catalogs(self, tables, serves=None):
+        serves = serves or {}
         converter.CONFIG["account_catalogs"] = {
-            self.entries[uid]["account_key"]: {"profile": self.account_profiles[uid], "models": items}
+            self.entries[uid]["account_key"]: {"profile": self.account_profiles[uid],
+                                               "models": items, "serves": serves.get(uid)}
             for uid, items in tables.items()
         }
         converter.invalidate_model_table()
@@ -384,6 +386,41 @@ class RegionRoutingTests(unittest.TestCase):
                 expected = set(PROFILES) - {unavailable}
                 for _ in range(6):
                     self.post_ok("chat/completions", self.payload(), expected)
+
+    def test_account_root_models_route_when_the_picker_subset_omits_them(self):
+        """选择器省略的账号根表候选仍可经原模型名进入三协议路由。"""
+        tables = catalogs()
+        self.configure(tables=tables)
+        for profile in PROFILES:
+            for endpoint in GENERATIONS:
+                self.post_rejected(endpoint, self.payload(endpoint, profile + "-root-only"))
+        self.account_catalogs(tables, serves={
+            profile: tables[profile] + [model(profile + "-root-only")] for profile in PROFILES})
+        for profile in PROFILES:
+            for endpoint in GENERATIONS:
+                with self.subTest(profile=profile, endpoint=endpoint):
+                    request, sent = self.post_ok(
+                        endpoint, self.payload(endpoint, profile + "-root-only"), {profile})
+                    self.assertEqual(sent["model"], profile + "-root-only")
+                    self.assertEqual(request.url.host, HOSTS[profile])
+        # exclusive 模型仍然只在自家账号上可用：根表按账号取，不会把 A 的能力借给 B。
+        self.post_rejected("chat/completions", self.payload("chat/completions", "no-such-model"))
+        ids = {item["id"] for item in self.client.get("/v1/models").json()["data"]}
+        self.assertIn("cn-cli-root-only", ids, "对外模型表要能报出实际发得出去的模型")
+
+    def test_unusable_root_models_are_not_advertised(self):
+        """根表里不支持工具调用的模型（图像档等）不进对外列表，也不参与路由。"""
+        tables = catalogs()
+        self.configure(tables=tables)
+        self.account_catalogs(tables, serves={
+            profile: tables[profile] + [{"id": profile + "-image", "name": "image",
+                                         "credits": "x5.00 credits"}]
+            for profile in PROFILES})
+        for profile in PROFILES:
+            self.post_rejected("chat/completions", self.payload("chat/completions",
+                                                                profile + "-image"))
+        ids = {item["id"] for item in self.client.get("/v1/models").json()["data"]}
+        self.assertNotIn("cn-cli-image", ids)
 
     def test_unknown_or_empty_catalog_never_borrows_other_profile_models(self):
         for unavailable in PROFILES:

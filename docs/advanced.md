@@ -107,6 +107,16 @@ The WebUI supports direct uploads; these rules concern path imports through `POS
 
 Select client models from the WebUI or `GET /v1/models`. Catalogs are cached by account/tenant, region, product and client version in `auth/model-catalog.json`, with a default 6-hour TTL. New credentials trigger synchronization; failures retain only the same account's trusted cache. Legacy unscoped catalogs cannot authorize other accounts.
 
+Each `/v3/config` refresh caches the agent picker subset as `models` and the account root table
+as `serves`. Routing and `GET /v1/models` merge these candidates, with picker metadata winning
+for duplicate IDs. Both scopes retain `disabled` and `availableModels` filtering; models without
+tool support are excluded.
+
+The root table is not a guarantee that a backend serves every listed model; measured `11102`
+avoidance still applies. Unknown account catalogs do not authorize dispatch and must not trigger
+a premature all-backends-unsupported 404; they retain the retryable readiness state.
+Legacy cache entries without `serves` use the picker until the next refresh.
+
 Beyond standard model fields, `credits` is the lowest source multiplier: `0.0` identifies a zero-multiplier source and `null` means no parseable multiplier was declared. `credits_by_profile` provides source details, such as `{"intl-work":0.0,"cn-cli":0.03}`. Compatible clients may ignore these fields; multipliers are not guaranteed to stay unchanged.
 
 Credential domain / token issuer determine the product identity. Chat and refresh use fixed origins with separate product headers:
@@ -118,7 +128,8 @@ Credential domain / token issuer determine the product identity. Chat and refres
 | `intl-cli` | `https://www.codebuddy.ai` |
 | `intl-work` | `https://www.workbuddy.ai` |
 
-- By default, accounts are selected only for models supported by their own trusted catalog; catalogs and balances are never borrowed across accounts. Concrete zero-multiplier models take priority, followed by expiring-credit priority, cooldowns and session stickiness.
+- By default, accounts are selected only for models supported by their own trusted catalog
+  (picker ∪ account root table, see above); catalogs and balances are never borrowed across accounts. Concrete zero-multiplier models take priority, followed by expiring-credit priority, cooldowns and session stickiness.
 - Zero-balance accounts leave paid-model rotation but can still serve concrete zero-multiplier models declared by their own catalog; they rejoin once balance recovers. International paid models need a known positive balance, with an exception for concrete zero-multiplier models.
 - `auto` schedules an account's default, not any model. International accounts need positive balance and `default-model` in their catalog; domestic WorkBuddy must declare `auto`, and domestic CLI needs a known nonempty usable catalog. `auto` does not receive the concrete zero-multiplier balance exemption.
 - WebUI region, product and credential bindings strictly limit candidates; unavailable bindings never fall back to unselected accounts. Disabled models also reject direct requests. Renaming hides the original ID unless you choose to retain it.

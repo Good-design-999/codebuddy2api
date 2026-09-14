@@ -14,7 +14,7 @@ from copy import deepcopy
 import json
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import httpx
 
@@ -190,7 +190,10 @@ class CatalogSelectionTests(unittest.TestCase):
                 "app.credits.select_product_models", wraps=select_product_models) as select:
             factory.return_value.__enter__.return_value = client
             self.assertEqual(fetch_model_catalog(token, "CLI/test"), [data["models"][1]])
-            select.assert_called_once_with(data, "cli")
+            # 选择器与账号根表两个作用域共用一次拉取，解析各调一次。
+            select.assert_has_calls([call(data, "cli"), call(data, "cli", scope="account")])
+            self.assertEqual(select.call_count, 2)
+            self.assertEqual(client.get.call_count, 1, "两个作用域必须共用一次 /v3/config")
         args, kwargs = client.get.call_args
         self.assertEqual(args[0], "https://www.codebuddy.ai/v3/config")
         self.assertEqual(kwargs["headers"]["x-client-platform"], "cli")

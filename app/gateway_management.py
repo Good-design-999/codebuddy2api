@@ -90,7 +90,8 @@ class Management:
             pool._rescan()
         facts = {}
         for account in (self.CONFIG.get("account_catalogs") or {}).values():
-            for item in self.gateway._usable_models(account.get("models")):
+            for item in self.gateway._usable_models(
+                    self.gateway._account_scope(account, "serves") or []):
                 source = item["id"]
                 row = facts.setdefault(source, {"id": source, "credits": None, "credits_by_profile": {}})
                 price = self.gateway._multiplier_value(item.get("credits"))
@@ -131,7 +132,7 @@ class Management:
                     reason = "模型额度冷却"
                 else:
                     account = (self.CONFIG.get("account_catalogs") or {}).get(identity, {})
-                    models = account.get("models")
+                    models = self.gateway._account_scope(account, "serves")
                     if self.CONFIG.get("account_catalogs") is not None:
                         if models is None:
                             reason = "目录尚未就绪"

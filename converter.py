@@ -735,7 +735,7 @@ class CredentialPool:
             if identity != entry.get("account_key"):
                 return False
             account = (CONFIG.get("account_catalogs") or {}).get(identity) or {}
-            models = account.get("models")
+            models = _account_scope(account, "serves")
             if account.get("profile") != profile or models is None:
                 return False
             usable = _usable_models(models)
@@ -743,7 +743,7 @@ class CredentialPool:
             cli_auto = model == "auto" and profile == "cn-cli" and bool(usable)
             # 关闭 guard 仅允许单产品的明确表外透传，不能把 A 的已知能力借给 B。
             declared = any(item["id"] == _upstream_model(model, profile)
-                           for item in _models_for_profile(profile, configured))
+                           for item in _models_for_profile(profile, configured, scope="serves"))
             passthrough = (model != "auto" and not declared and not CONFIG.get("model_guard")
                            and len(configured) == 1)
             if model and not (supported or cli_auto or passthrough):
@@ -764,7 +764,7 @@ class CredentialPool:
             account = (accounts or {}).get(entry.get("account_key")) or {}
             if account.get("profile") != profile:
                 return False
-            return _model_free(account.get("models"), model, profile)
+            return _model_free(_account_scope(account, "serves"), model, profile)
         return _model_free(_models_for_profile(profile), model, profile)
 
     @classmethod
@@ -957,17 +957,32 @@ class CredentialPool:
         return bool(endpoint) and self._blocks.clear(endpoint, _block_model(model))
 
     def model_block_until(self, model: str | None, *, region=None) -> float | None:
-        """该模型在所有可用后端上都处于避让期时返回最晚解除时间，否则 None。
-
-        只要还有一个后端没被避让就照常派发；全被避让时上层直接快速失败，不再白打上游。"""
+        """所有潜在后端均有实测避让时返回解除时间；未知目录不等于不支持。"""
         if not model:
             return None
         now = time.time()
         with self._lock:
-            endpoints = {self._entry_endpoint(e) for e in self._entries
-                         if self._healthy(e) and (region is None
-                                                  or _in_region(self._entry_profile(e), region))}
+            candidates = [e for e in self._entries
+                          if self._healthy(e) and (region is None
+                                                   or _in_region(self._entry_profile(e), region))]
+            endpoints = {self._entry_endpoint(e) for e in candidates}
+            # 已知不支持的后端不抵消避让；未知目录仍是潜在来源，但不获得派发资格。
+            capable = {self._entry_endpoint(e) for e in candidates
+                       if (profile := self._entry_profile(e))
+                       and profile in _model_profiles(model, profile_region(profile))}
+            accounts = CONFIG.get("account_catalogs")
+            def catalog_unknown(entry):
+                profile = self._entry_profile(entry)
+                if not profile:
+                    return False
+                if accounts is not None or CONFIG.get("model_cache") is not None:
+                    account = (accounts or {}).get(entry.get("account_key")) or {}
+                    return (account.get("profile") != profile
+                            or _account_scope(account, "serves") is None)
+                return _catalog_for(profile, "serves") is None
+            unknown = {self._entry_endpoint(e) for e in candidates if catalog_unknown(e)}
         endpoints.discard(None)
+        endpoints &= capable | unknown
         if not endpoints:
             return None
         routed = _block_model(model)
@@ -1154,8 +1169,10 @@ def _publish_model_cache():
                 if not identity or not profile:
                     continue
                 key = catalog_cache_key(profile, identity)
+                known = cache.age(key) is not None
                 accounts[identity] = {"profile": profile,
-                                      "models": cache.models(key) if cache.age(key) is not None else None}
+                                      "models": cache.models(key) if known else None,
+                                      "serves": cache.serves(key) if known else None}
             CONFIG["account_catalogs"] = accounts
             catalogs = {profile: None for profile in PROFILE_ENDPOINTS}
             for account in accounts.values():
@@ -1181,16 +1198,18 @@ def _sync_model_catalogs(pool, ledger, refs, failed):
         if cache.fresh(key) and not entry.get("catalog_dirty"):
             continue
         try:
-            models = credits_mod.fetch_model_catalog(
+            scopes = credits_mod.fetch_model_scopes(
                 _bearer_token(headers), domain=headers.get("X-Domain", ""),
                 uid=headers.get("X-User-Id", ""), enterprise_id=headers.get("X-Enterprise-Id", ""))
+            models, serves = scopes["picker"], scopes["account"]
             def publish():
-                cache.put(key, models)
+                cache.put(key, models, serves=serves)
                 for current in pool._entries:
                     if current["cm"] is entry["cm"]:
                         current["catalog_dirty"] = False
             if pool.apply_if_current(entry["cm"], generation, publish):
-                _log(f"[models] {profile} 模型表已刷新: {len(models)} 个")
+                _log(f"[models] {profile} 模型表已刷新: 选择器 {len(models)} 个，"
+                     f"账号根表 {len(serves)} 个")
             else:
                 failed.add(entry["id"])
         except Exception as error:
@@ -1389,8 +1408,9 @@ CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "models_remote": None,   # 国内站云端模型表（缓存或同步结果）
                 "models_intl": None,     # 国际站云端模型表（仅当有国际凭证且有额度时对外暴露）
                 "model_cache": None,     # ModelCatalogCache：按站点分组持久化，TTL 内不打云端
-                "model_catalogs": {},   # 仅供展示/guard 的产品合并目录
+                "model_catalogs": {},   # 仅供展示的产品合并目录（选择器子集）
                 "account_catalogs": None,  # 生产按账号指纹绑定；None 仅兼容无持久缓存的嵌入模式
+                                           # 每项含 models（选择器子集）与 serves（账号根表候选）
                 "auto_trial": False, "trial_ledger": None,
                 "model_guard": True,     # 表外模型本地拦截，不转发上游
                 "max_images": 16, "image_policy": "truncate",
@@ -1900,7 +1920,8 @@ def invalidate_model_table() -> None:
     _model_table_cache = {}
 
 
-def _catalog_for(profile: str):
+def _catalog_for(profile: str, scope: str = "models"):
+    """该 profile 的模型目录；scope 含义见 _account_scope。"""
     accounts = CONFIG.get("account_catalogs")
     if accounts is not None or CONFIG.get("model_cache") is not None:
         pool = CONFIG.get("cred_pool")
@@ -1909,10 +1930,11 @@ def _catalog_for(profile: str):
             if entry.get("profile") != profile:
                 continue
             account = (accounts or {}).get(entry.get("account_key")) or {}
-            if account.get("profile") == profile and account.get("models") is not None:
+            items = _account_scope(account, scope)
+            if account.get("profile") == profile and items is not None:
                 if models is None:
                     models = []
-                models.extend(account["models"])
+                models.extend(items)
         return models
     catalogs = CONFIG.get("model_catalogs") or {}
     if profile in catalogs:
@@ -1944,8 +1966,18 @@ def _usable_models(models):
             and not model.get("disabled")]
 
 
-def _models_for_profile(profile: str, configured=None) -> list[dict]:
-    models = _catalog_for(profile)
+def _account_scope(account: dict, scope: str = "models") -> list[dict] | None:
+    """models 取选择器；serves 合并根表候选，同名保留选择器元数据。"""
+    picker = account.get("models")
+    if scope == "models" or picker is None:
+        return picker
+    seen = {item.get("id") for item in picker}
+    # 子集优先：同名条目保留 agent 里的那份元数据，根表只负责补名字。
+    return picker + [item for item in account.get("serves") or [] if item.get("id") not in seen]
+
+
+def _models_for_profile(profile: str, configured=None, *, scope: str = "models") -> list[dict]:
+    models = _catalog_for(profile, scope)
     if models is None:
         # 只有旧式国内 CLI 单产品部署保留静态兜底，不把未知表借给 WorkBuddy。
         configured = _configured_profiles(profile_region(profile)) if configured is None else configured
@@ -1996,7 +2028,7 @@ def _model_profiles(model: str | None, region: str | None = None, configured=Non
         return profiles
     supported = {profile for profile in profiles
                  if any(item["id"] == _upstream_model(model, profile)
-                        for item in _models_for_profile(profile, configured))}
+                        for item in _models_for_profile(profile, configured, scope="serves"))}
     if model == "auto" and region == "cn":
         # WorkBuddy 有真实 Auto 时固定用它；只有 CLI 的旧部署保留 auto，不混轮询两种默认策略。
         if "cn-work" in configured and "cn-work" in supported:
@@ -2056,7 +2088,7 @@ def current_models(region: str | None = None) -> list[str]:
                 account = accounts.get(entry.get("account_key")) or {}
                 if account.get("profile") != profile:
                     continue
-                models = _usable_models(account.get("models"))
+                models = _usable_models(_account_scope(account, "serves"))
                 if zero:
                     models = [model for model in models if _free_multiplier(model.get("credits"))]
                 out.extend(model["id"] for model in models)
@@ -2117,7 +2149,7 @@ def current_model_details(region: str | None = None) -> list[dict]:
                 account = accounts.get(entry.get("account_key")) or {}
                 if account.get("profile") != profile:
                     continue
-                for item in _usable_models(account.get("models")):
+                for item in _usable_models(_account_scope(account, "serves")):
                     record(profile, item, zero=zero)
         else:
             configured = _configured_profiles(region)
