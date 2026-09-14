@@ -957,9 +957,7 @@ class CredentialPool:
         return bool(endpoint) and self._blocks.clear(endpoint, _block_model(model))
 
     def model_block_until(self, model: str | None, *, region=None) -> float | None:
-        """该模型在所有可用后端上都处于避让期时返回最晚解除时间，否则 None。
-
-        只要还有一个后端没被避让就照常派发；全被避让时上层直接快速失败，不再白打上游。"""
+        """所有潜在后端均有实测避让时返回解除时间；未知目录不等于不支持。"""
         if not model:
             return None
         now = time.time()
@@ -968,14 +966,23 @@ class CredentialPool:
                           if self._healthy(e) and (region is None
                                                    or _in_region(self._entry_profile(e), region))]
             endpoints = {self._entry_endpoint(e) for e in candidates}
-            # 只数按目录能服务这个名字的后端。别的服务不到它的后端不该以「自己没被避让」
-            # 的名义把模型级避让判成没有 —— 那会让下游拿到可重试的 503，而真实情况是这个
-            # 名字发不出去。目录判不出来（尚未同步）时退回全部后端，保持旧口径。
+            # 已知不支持的后端不抵消避让；未知目录仍是潜在来源，但不获得派发资格。
             capable = {self._entry_endpoint(e) for e in candidates
                        if (profile := self._entry_profile(e))
                        and profile in _model_profiles(model, profile_region(profile))}
+            accounts = CONFIG.get("account_catalogs")
+            def catalog_unknown(entry):
+                profile = self._entry_profile(entry)
+                if not profile:
+                    return False
+                if accounts is not None or CONFIG.get("model_cache") is not None:
+                    account = (accounts or {}).get(entry.get("account_key")) or {}
+                    return (account.get("profile") != profile
+                            or _account_scope(account, "serves") is None)
+                return _catalog_for(profile, "serves") is None
+            unknown = {self._entry_endpoint(e) for e in candidates if catalog_unknown(e)}
         endpoints.discard(None)
-        endpoints &= capable or endpoints
+        endpoints &= capable | unknown
         if not endpoints:
             return None
         routed = _block_model(model)

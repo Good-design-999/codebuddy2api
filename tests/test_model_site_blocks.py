@@ -248,6 +248,71 @@ class PoolRoutingTests(unittest.TestCase):
         self.assertEqual(caught.exception.detail["error"]["code"], "model_not_found")
 
 
+    def test_unknown_account_catalog_keeps_retryable_readiness(self):
+        model = {"id": MODEL, "supportsToolCall": True}
+        accounts = {e["account_key"]: {"profile": e["profile"],
+                     "models": [model] if e["profile"] == DOMESTIC_PROFILE else None}
+                    for e in self.pool.entries()}
+        converter.CONFIG["account_catalogs"] = accounts
+        converter.invalidate_model_table()
+        cm, _ = self.by_endpoint[DOMESTIC_ENDPOINT]
+        self.pool.note_status(cm, 404, model=MODEL, raw=_error_body(11102, "service info not found"))
+        self.assertEqual(self.pool._candidates(MODEL), [], "未知目录不能获得派发资格")
+        with self.assertRaises(HTTPException) as caught:
+            self.cred_for()
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(caught.exception.headers["Retry-After"], "3")
+        other = next(a for a in accounts.values() if a["profile"] == INTL_PROFILE)
+        other["models"] = []
+        converter.invalidate_model_table()
+        with self.assertRaises(HTTPException) as caught:
+            self.cred_for()
+        self.assertEqual(caught.exception.status_code, 404, "已知空目录与尚未就绪不同")
+        other["models"] = [model]
+        converter.invalidate_model_table()
+        self.assertIsNone(self.pool.model_block_until(MODEL))
+
+    def test_unknown_account_is_not_hidden_by_same_profile_empty_catalog(self):
+        pending = self.add_account("www.codebuddy.ai", "synthetic-intl-pending")
+        converter.CONFIG["account_catalogs"] = {
+            e["account_key"]: {"profile": e["profile"], "models":
+                ([{"id": MODEL, "supportsToolCall": True}] if e["profile"] == DOMESTIC_PROFILE
+                 else None if e["account_key"] == pending["account_key"] else [])}
+            for e in self.pool.entries()}
+        converter.invalidate_model_table()
+        self.assertEqual(converter._catalog_for(INTL_PROFILE, "serves"), [])
+        cm, _ = self.by_endpoint[DOMESTIC_ENDPOINT]
+        self.pool.note_status(cm, 404, model=MODEL, raw=_error_body(11102, "service info not found"))
+        with self.assertRaises(HTTPException) as caught:
+            self.cred_for()
+        self.assertEqual(caught.exception.status_code, 503)
+
+    def test_unknown_legacy_profile_still_prevents_premature_model_rejection(self):
+        converter.CONFIG["model_catalogs"][INTL_PROFILE] = None
+        converter.invalidate_model_table()
+        cm, _ = self.by_endpoint[DOMESTIC_ENDPOINT]
+        self.pool.note_status(cm, 404, model=MODEL, raw=_error_body(11102, "service info not found"))
+        with self.assertRaises(HTTPException) as caught:
+            self.cred_for()
+        self.assertEqual(caught.exception.status_code, 503)
+
+    def test_single_profile_passthrough_still_reports_measured_rejection(self):
+        _, identifier = self.by_endpoint[DOMESTIC_ENDPOINT]
+        _, other_identifier = self.by_endpoint[INTL_ENDPOINT]
+        Path(other_identifier).unlink()
+        self.pool.prune()
+        self.pool.reload([Path(identifier)])
+        converter.CONFIG["model_catalogs"] = {DOMESTIC_PROFILE: [
+            {"id": OTHER_MODEL, "supportsToolCall": True}]}
+        converter.CONFIG["model_guard"] = False
+        converter.invalidate_model_table()
+        cm, _ = self.by_endpoint[DOMESTIC_ENDPOINT]
+        self.pool.note_status(cm, 404, model=MODEL, raw=_error_body(11102, "service info not found"))
+        with self.assertRaises(HTTPException) as caught:
+            self.cred_for()
+        self.assertEqual(caught.exception.status_code, 404)
+
+
     def test_region_scoped_fast_failure(self):
         """只在国际站内全部避让时才拒 intl 请求；cn 请求照旧通过。"""
         cm, _ = self.by_endpoint[INTL_ENDPOINT]
