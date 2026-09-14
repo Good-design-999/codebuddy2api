@@ -250,6 +250,42 @@ class OutputBudgetTests(unittest.TestCase):
         self.assertEqual(len(raw), 1024)
 
 
+class BoundedErrorReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_filling_the_limit_never_pulls_another_chunk_and_closes_response(self):
+        for chunks in ((b"abcdefgh",), (b"abcd", b"efgh"), (b"abcd", b"efgh-tail")):
+            with self.subTest(chunks=chunks):
+                class CappedStream(httpx.AsyncByteStream):
+                    closed = False
+
+                    async def __aiter__(self):
+                        for chunk in chunks:
+                            yield chunk
+                        raise AssertionError("reader waited for data after reaching its budget")
+
+                    async def aclose(self):
+                        self.closed = True
+
+                stream = CappedStream()
+                transport = httpx.MockTransport(lambda request: httpx.Response(500, stream=stream))
+                async with httpx.AsyncClient(transport=transport) as client:
+                    async with client.stream("POST", "https://synthetic.invalid") as response:
+                        raw = await upstream_io.read_bounded_error(response, limit=8)
+                        self.assertEqual(raw, b"abcdefgh")
+                    self.assertTrue(stream.closed)
+
+    async def test_short_error_body_is_preserved(self):
+        response = httpx.Response(400, content=b"short")
+        self.assertEqual(await upstream_io.read_bounded_error(response, limit=8), b"short")
+
+    async def test_zero_budget_does_not_open_the_iterator(self):
+        class NoRead:
+            def aiter_bytes(self):
+                raise AssertionError("zero budget must not read upstream")
+
+        self.assertEqual(await upstream_io.read_bounded_error(NoRead(), limit=0), b"")
+
+
+
 class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_or_malformed_stream_never_replays_post(self):
         raw_cases = [b"", b"data: {}\n\ndata: [DONE]\n\n",

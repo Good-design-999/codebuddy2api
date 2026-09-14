@@ -159,11 +159,13 @@ ERROR_BODY_LIMIT = 4 * 1024 * 1024  # 错误响应读取上限：错误页不应
 
 async def read_bounded_error(response, limit: int = ERROR_BODY_LIMIT) -> bytes:
     """错误体有界读取：超限即截断，不再整段 aread。"""
+    if limit <= 0:
+        return b""
     buf = bytearray()
     async for chunk in response.aiter_bytes():
+        buf.extend(chunk[:limit - len(buf)])
         if len(buf) >= limit:
             break
-        buf.extend(chunk[: max(0, limit - len(buf))])
     return bytes(buf)
 
 
