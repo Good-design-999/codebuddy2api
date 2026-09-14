@@ -438,6 +438,19 @@ def test_stop_sequences_are_mapped():
         pass
     print("✅ test_stop_sequences_are_mapped")
 
+def test_tool_result_is_error_is_preserved():
+    """is_error:true 与成功结果同正文时必须可区分：失败被编码进正文前缀。"""
+    def conv(is_error):
+        block = {"type": "tool_result", "tool_use_id": "toolu_1", "content": "exit 1"}
+        if is_error is not None:
+            block["is_error"] = is_error
+        req = {"model": "auto", "max_tokens": 64, "messages": [{"role": "user", "content": [block]}]}
+        return anthropic_request_to_chat(req)["messages"][0]["content"]
+    assert conv(True).startswith("[tool execution failed]\nexit 1")
+    assert conv(False) == "exit 1"
+    assert conv(None) == "exit 1"
+    print("✅ test_tool_result_is_error_is_preserved")
+
 
 if __name__ == "__main__":
     test_simple_text_request()
@@ -455,4 +468,5 @@ if __name__ == "__main__":
     test_empty_messages()
     test_disable_parallel_tool_use_is_mapped()
     test_stop_sequences_are_mapped()
-    print(f"\n🎉 All {15} tests passed!")
+    test_tool_result_is_error_is_preserved()
+    print(f"\n🎉 All {16} tests passed!")
