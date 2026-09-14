@@ -12,6 +12,56 @@ from __future__ import annotations
 import json
 
 
+import asyncio
+
+
+_GATED_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
+
+
+class ConcurrencyLimitMiddleware:
+    """推理端点并发上限：占满立即 503，不排队放大聚合内存。
+
+    信号量从进入持有到响应体发完（含流式），覆盖整个上游连接生命周期。"""
+
+    def __init__(self, app, config):
+        self.app = app
+        self.config = config
+        self._semaphore = None
+
+    def _gate(self):
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self._limit())
+        return self._semaphore
+
+    def _limit(self) -> int:
+        try:
+            return max(0, int(self.config.get("max_concurrent") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    async def __call__(self, scope, receive, send):
+        if (scope["type"] != "http" or scope.get("method") != "POST"
+                or not scope.get("path", "").startswith(_GATED_PATHS)):
+            return await self.app(scope, receive, send)
+        limit = self._limit()
+        if limit <= 0:
+            return await self.app(scope, receive, send)
+        gate = self._gate()
+        if gate.locked():  # 无空闲名额：立即失败并给出重试提示
+            raw = json.dumps({"error": {"message": "inference concurrency limit reached, retry later",
+                                        "type": "rate_limit_error", "code": "concurrency_limit"}}).encode()
+            await send({"type": "http.response.start", "status": 503,
+                        "headers": [(b"content-type", b"application/json"), (b"retry-after", b"3"),
+                                    (b"content-length", str(len(raw)).encode())]})
+            await send({"type": "http.response.body", "body": raw})
+            return
+        await gate.acquire()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            gate.release()
+
+
 class InboundBodyLimitMiddleware:
     """/v1/* 请求的原始字节上限；limit<=0 时关闭。"""
 

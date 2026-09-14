@@ -72,7 +72,7 @@ from app.observability import (AuditMiddleware, observe_route, observe_usage,
                                observe_attempt, observe_failure)
 from app.credential_io import (CredentialFileError, read_import_file, atomic_write_credential,
                                credential_file_lock)
-from app.upstream_io import ChatSSEAccumulator, UpstreamResponseError, open_backend_stream
+from app.upstream_io import ChatSSEAccumulator, UpstreamResponseError, open_backend_stream, read_bounded_error
 from app.content_filter import ContentFilterDetector, is_filter_error
 from app.request_limits import ImageLimitError, apply_image_policy
 from app.safe_logging import format_log_body, sanitize_log_text
@@ -1398,6 +1398,7 @@ CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "max_images": 16, "image_policy": "truncate",
                 "max_request_bytes": 32 * 1024 * 1024, "log_body_limit": 65536,
                 "max_inbound_bytes": 64 * 1024 * 1024,
+                "max_collect_bytes": 8 * 1024 * 1024, "max_concurrent": 64,
                 "usage_daily": None,     # 官方用量聚合视图（日期×模型 credit），供 billing/usage 出 daily_costs
                 "usage_daily_accounts": None,  # 按账号的用量快照；单账号失败不丢历史
                 "credit_price_cny": None, "credit_price_usd": None, "usd_rate": None,
@@ -2439,7 +2440,7 @@ def _tool_calls_healthy(tool_calls, body: dict | None = None) -> bool:
 
 def _merge_chat_sse_text(text: str) -> dict:
     """文本路径与异步流路径使用同一聚合器。"""
-    accumulator = ChatSSEAccumulator()
+    accumulator = ChatSSEAccumulator(max_collect_bytes=CONFIG.get("max_collect_bytes", 0))
     for line in text.splitlines():
         accumulator.feed_line(line)
     return accumulator.result()
@@ -2557,11 +2558,11 @@ async def _fetch_checked_chat(url, headers, body, model_name, rid, cred=None, *,
     tool_attempt = 0
     filter_retried = False
     while True:
-        accumulator = ChatSSEAccumulator()
+        accumulator = ChatSSEAccumulator(max_collect_bytes=CONFIG.get("max_collect_bytes", 0))
         rejection = None
         async with _backend_stream(url, headers, body, rid=rid, model_name=model_name) as response:
             if response.status_code != 200:
-                _check_upstream_status(response.status_code, await response.aread(), cred, body.get("model"))
+                _check_upstream_status(response.status_code, await read_bounded_error(response), cred, body.get("model"))
             else:
                 _note_cred_model_ok(cred, body.get("model"))
             try:
@@ -2627,7 +2628,7 @@ async def _chat_sse_lines(url, headers, body, model_name, t0, rid, cred=None, *,
     budget = CONFIG["log_body_limit"] if CONFIG.get("log_path") else 0
     async with _backend_stream(url, headers, body, rid=rid, model_name=model_name) as response:
         if response.status_code != 200:
-            _check_upstream_status(response.status_code, await response.aread(), cred, body.get("model"))
+            _check_upstream_status(response.status_code, await read_bounded_error(response), cred, body.get("model"))
         else:
             _note_cred_model_ok(cred, body.get("model"))
         async for line in response.aiter_lines():
@@ -3049,6 +3050,12 @@ def main():
     ap.add_argument("--max-inbound-bytes", type=_positive_int, metavar="BYTES",
                     default=os.environ.get("CODEBUDDY2API_MAX_INBOUND_BYTES", str(64 * 1024 * 1024)),
                     help="入站原始请求体字节上限（解析前生效，含 chunked），默认 64 MiB")
+    ap.add_argument("--max-collect-bytes", type=_nonnegative_int, metavar="BYTES",
+                    default=os.environ.get("CODEBUDDY2API_MAX_COLLECT_BYTES", str(8 * 1024 * 1024)),
+                    help="聚合路径输出收集总字节上限（正文+思考+工具参数），默认 8 MiB；0 不限制")
+    ap.add_argument("--max-concurrent", type=_nonnegative_int, metavar="N",
+                    default=os.environ.get("CODEBUDDY2API_MAX_CONCURRENT", "64"),
+                    help="推理端点并发上限（超出立即 503），默认 64；0 不限制")
     ap.add_argument("--log-body-limit", type=_nonnegative_int, metavar="BYTES",
                     default=os.environ.get("CODEBUDDY2API_LOG_BODY_LIMIT", "65536"),
                     help="每条正文日志的预览字节上限，默认 64 KiB；0 只记录摘要")
@@ -3071,7 +3078,7 @@ def main():
                  "请设置 CODEBUDDY2API_KEY，或确知风险后以 CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true 显式放行")
 
     for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit", "auto_trial",
-                "tool_call_max_retry", "max_inbound_bytes"):
+                "tool_call_max_retry", "max_inbound_bytes", "max_collect_bytes", "max_concurrent"):
         CONFIG[key] = getattr(args, key)
     CONFIG["api_key"] = args.api_key
     CONFIG["desensitize"] = args.desensitize

@@ -222,6 +222,34 @@ class AccumulatorTests(unittest.TestCase):
         self.assertEqual(result["finish_reason"], "content_filter")
 
 
+class OutputBudgetTests(unittest.TestCase):
+    """聚合收集预算与错误体有界读取。"""
+
+    def test_collect_budget_aborts_oversized_aggregation(self):
+        acc = ChatSSEAccumulator(max_collect_bytes=10)  # 两片各 8B，第二片超预算
+        acc.feed_line('data: {"choices":[{"index":0,"delta":{"content":"12345678"}}]}')
+        with self.assertRaises(UpstreamResponseError) as caught:
+            acc.feed_line('data: {"choices":[{"index":0,"delta":{"content":"12345678"}}]}')
+        self.assertEqual(caught.exception.status, 502)
+        self.assertIn(b"response_too_large", caught.exception.raw)
+        # 预算内不受影响
+        acc = ChatSSEAccumulator(max_collect_bytes=1024)
+        acc.feed_line('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}')
+        acc.feed_line("data: [DONE]")
+        self.assertEqual(acc.result()["content"], "ok")
+
+    def test_error_body_read_is_bounded(self):
+        import asyncio
+
+        class BigError:
+            async def aiter_bytes(self):
+                for _ in range(8):
+                    yield b"x" * 1024 * 1024
+
+        raw = asyncio.run(upstream_io.read_bounded_error(BigError(), limit=1024))
+        self.assertEqual(len(raw), 1024)
+
+
 class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_or_malformed_stream_never_replays_post(self):
         raw_cases = [b"", b"data: {}\n\ndata: [DONE]\n\n",

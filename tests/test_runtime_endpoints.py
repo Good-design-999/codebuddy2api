@@ -635,6 +635,44 @@ class InboundBodyLimitTests(unittest.TestCase):
         self.assertEqual(sent[0]["status"], 413)
 
 
+class ConcurrencyLimitTests(unittest.IsolatedAsyncioTestCase):
+    """并发上限：名额占满立即 503（含 Retry-After），释放后恢复。"""
+
+    async def test_full_gate_returns_503_and_recovers(self):
+        from app.inbound_limits import ConcurrencyLimitMiddleware
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_app(scope, receive, send):
+            entered.set()
+            await release.wait()
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        mw = ConcurrencyLimitMiddleware(slow_app, {"max_concurrent": 1})
+        scope = {"type": "http", "method": "POST", "path": "/v1/chat/completions"}
+
+        async def receive():
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        first = asyncio.create_task(mw(scope, receive, send))
+        await asyncio.wait_for(entered.wait(), 2)
+        await mw(scope, receive, send)
+        starts = [m for m in sent if m["type"] == "http.response.start"]
+        self.assertEqual(starts[-1]["status"], 503)
+        self.assertIn(b"retry-after", dict(starts[-1]["headers"]))
+        release.set()
+        await asyncio.wait_for(first, 2)
+        sent.clear()
+        await mw(scope, receive, send)
+        self.assertEqual(sent[0]["status"], 200)
+
+
 class ConfigurationTests(unittest.TestCase):
     def configure(self, env=None, flags=(), invalid=False):
         with contextlib.ExitStack() as stack:

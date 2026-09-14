@@ -91,8 +91,10 @@ def install(gateway):
     install_admin(app, config, config["management"])
     app.add_middleware(AuditMiddleware, config=config)
     app.add_middleware(PolicyScopeMiddleware)
-    from .inbound_limits import InboundBodyLimitMiddleware
-    app.add_middleware(InboundBodyLimitMiddleware, config=config)  # 最外层：解析前限原始字节
+    from .inbound_limits import ConcurrencyLimitMiddleware, InboundBodyLimitMiddleware
+    app.add_middleware(InboundBodyLimitMiddleware, config=config)
+    # 最外层：并发名额先用完即 503，再进行请求体缓冲与处理
+    app.add_middleware(ConcurrencyLimitMiddleware, config=config)
     install_pages(app, Path(gateway.__file__).resolve().parent / "web" / "dist")
 
 

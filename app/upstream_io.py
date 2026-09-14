@@ -21,8 +21,10 @@ class UpstreamResponseError(Exception):
 class ChatSSEAccumulator:
     """聚合 Chat SSE，拒绝错误事件、空输出和无结束标记的残流。"""
 
-    def __init__(self, *, collect=True):
+    def __init__(self, *, collect=True, max_collect_bytes: int = 0):
         self.collect = collect
+        self.max_collect_bytes = max(0, int(max_collect_bytes or 0))
+        self.collected_bytes = 0
         self.content = []
         self.reasoning = []
         self.refusal = []
@@ -92,12 +94,11 @@ class ChatSSEAccumulator:
                     self.saw_output = True
             if "tool_calls" in delta and not isinstance(delta["tool_calls"], list):
                 raise ValueError("tool_calls")
-            if self.collect and delta.get("content"):
-                self.content.append(delta["content"])
-            if self.collect and delta.get("reasoning_content"):
-                self.reasoning.append(delta["reasoning_content"])
-            if self.collect and delta.get("refusal"):
-                self.refusal.append(delta["refusal"])
+            if self.collect:
+                for key in ("content", "reasoning_content", "refusal"):
+                    if delta.get(key):
+                        getattr(self, key if key != "reasoning_content" else "reasoning").append(delta[key])
+                        self._charge(len(delta[key].encode("utf-8")))
             for tool in delta.get("tool_calls") or []:
                 if not isinstance(tool, dict):
                     raise ValueError("tool")
@@ -118,8 +119,20 @@ class ChatSSEAccumulator:
                     self.saw_output = True
                 slot["name"] = function.get("name") or slot["name"]
                 if self.collect:
-                    slot["arguments"] += function.get("arguments") or ""
+                    piece = function.get("arguments") or ""
+                    slot["arguments"] += piece
+                    self._charge(len(piece.encode("utf-8")))
             self.filter_detector.feed(delta, choice.get("finish_reason"))
+
+    def _charge(self, size: int):
+        """聚合收集总字节预算：超限即失败，不把无界输出缓存在内存里。"""
+        if not self.collect or not self.max_collect_bytes:
+            return
+        self.collected_bytes += size
+        if self.collected_bytes > self.max_collect_bytes:
+            raise UpstreamResponseError(502, json.dumps({"error": {
+                "message": f"upstream response exceeds the {self.max_collect_bytes}-byte collection budget",
+                "type": "upstream_error", "code": "response_too_large"}}).encode())
 
     def result(self):
         if not self.saw_choice or not (self.done or self.finish_reason):
@@ -139,6 +152,19 @@ class ChatSSEAccumulator:
                 "refusal": "".join(self.refusal) or None,
                 "tool_calls": tools, "finish_reason": self.finish_reason,
                 "usage": self.usage, "model": self.model}
+
+
+ERROR_BODY_LIMIT = 4 * 1024 * 1024  # 错误响应读取上限：错误页不应撑爆内存
+
+
+async def read_bounded_error(response, limit: int = ERROR_BODY_LIMIT) -> bytes:
+    """错误体有界读取：超限即截断，不再整段 aread。"""
+    buf = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(buf) >= limit:
+            break
+        buf.extend(chunk[: max(0, limit - len(buf))])
+    return bytes(buf)
 
 
 @asynccontextmanager
