@@ -209,6 +209,26 @@ class SecurityTests(unittest.TestCase):
                 self.assert_http(400, lambda: self.post(source.name))
                 self.assertFalse((self.auth / source.name).exists())
 
+    def test_oversized_integer_timestamps_return_400_without_writes(self):
+        from fastapi.testclient import TestClient
+
+        with TestClient(converter.app) as client, patch.object(converter, "_store_credential") as store:
+            for field in ("expiresAt", "lastRefreshTime"):
+                for value in (10**1000, -(10**1000)):
+                    with self.subTest(field=field, negative=value < 0):
+                        data = credential(token="synthetic-secret")
+                        data["auth"][field] = value
+                        source = self.source("invalid-time.info", data)
+                        response = client.post("/admin/credentials", json={"path": source.name},
+                                               headers={"Authorization": "Bearer synthetic-admin-key"})
+                        self.assertEqual(response.status_code, 400, response.text)
+                        self.assertNotIn("synthetic-secret", response.text)
+                        self.assertNotIn(str(self.root), response.text)
+                        self.assertFalse((self.auth / source.name).exists())
+            store.assert_not_called()
+            self.assertEqual(self.pool.entries(), [])
+
+
     def test_same_name_updates_pool(self):
         source = self.source()
         self.post(source.name)

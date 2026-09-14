@@ -222,6 +222,70 @@ class AccumulatorTests(unittest.TestCase):
         self.assertEqual(result["finish_reason"], "content_filter")
 
 
+class OutputBudgetTests(unittest.TestCase):
+    """聚合收集预算与错误体有界读取。"""
+
+    def test_collect_budget_aborts_oversized_aggregation(self):
+        acc = ChatSSEAccumulator(max_collect_bytes=10)  # 两片各 8B，第二片超预算
+        acc.feed_line('data: {"choices":[{"index":0,"delta":{"content":"12345678"}}]}')
+        with self.assertRaises(UpstreamResponseError) as caught:
+            acc.feed_line('data: {"choices":[{"index":0,"delta":{"content":"12345678"}}]}')
+        self.assertEqual(caught.exception.status, 502)
+        self.assertIn(b"response_too_large", caught.exception.raw)
+        # 预算内不受影响
+        acc = ChatSSEAccumulator(max_collect_bytes=1024)
+        acc.feed_line('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}')
+        acc.feed_line("data: [DONE]")
+        self.assertEqual(acc.result()["content"], "ok")
+
+    def test_error_body_read_is_bounded(self):
+        import asyncio
+
+        class BigError:
+            async def aiter_bytes(self):
+                for _ in range(8):
+                    yield b"x" * 1024 * 1024
+
+        raw = asyncio.run(upstream_io.read_bounded_error(BigError(), limit=1024))
+        self.assertEqual(len(raw), 1024)
+
+
+class BoundedErrorReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_filling_the_limit_never_pulls_another_chunk_and_closes_response(self):
+        for chunks in ((b"abcdefgh",), (b"abcd", b"efgh"), (b"abcd", b"efgh-tail")):
+            with self.subTest(chunks=chunks):
+                class CappedStream(httpx.AsyncByteStream):
+                    closed = False
+
+                    async def __aiter__(self):
+                        for chunk in chunks:
+                            yield chunk
+                        raise AssertionError("reader waited for data after reaching its budget")
+
+                    async def aclose(self):
+                        self.closed = True
+
+                stream = CappedStream()
+                transport = httpx.MockTransport(lambda request: httpx.Response(500, stream=stream))
+                async with httpx.AsyncClient(transport=transport) as client:
+                    async with client.stream("POST", "https://synthetic.invalid") as response:
+                        raw = await upstream_io.read_bounded_error(response, limit=8)
+                        self.assertEqual(raw, b"abcdefgh")
+                    self.assertTrue(stream.closed)
+
+    async def test_short_error_body_is_preserved(self):
+        response = httpx.Response(400, content=b"short")
+        self.assertEqual(await upstream_io.read_bounded_error(response, limit=8), b"short")
+
+    async def test_zero_budget_does_not_open_the_iterator(self):
+        class NoRead:
+            def aiter_bytes(self):
+                raise AssertionError("zero budget must not read upstream")
+
+        self.assertEqual(await upstream_io.read_bounded_error(NoRead(), limit=0), b"")
+
+
+
 class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_or_malformed_stream_never_replays_post(self):
         raw_cases = [b"", b"data: {}\n\ndata: [DONE]\n\n",

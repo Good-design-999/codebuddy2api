@@ -343,7 +343,7 @@ def fetch_credits(access_token: str, uid: str = "", domain: str = "") -> dict:
             if page > CREDITS_MAX_PAGES:
                 partial = True
                 break
-            rows = _fetch_accounts_page(client, url, headers, page, retry_empty=(page == 1))
+            rows = _fetch_accounts_page(client, url, headers, page, retry_empty=True)  # 空页在任何页都可能是瞬时现象，一律重试
             accounts.extend(rows)
             if len(rows) < CREDITS_PAGE_SIZE:
                 break

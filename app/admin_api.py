@@ -336,13 +336,16 @@ def install_admin(app, config, gateway):
             directory = gateway.managed_auth_dir().resolve()
             for name, content in prepared:
                 try:
-                    data = json.loads(content)
+                    data = auth_oauth.loads_strict(content)  # 严格解析：拒绝 NaN/Infinity 常量
                     uid, invalid = auth_oauth.validate_cred_data(data)
                     if invalid or not isinstance(data.get("account") or {}, dict) or type(data["auth"].get("expiresAt", 0)) not in (int, float):
                         raise CredentialFileError("凭据格式无效")
                     if not body.get("replace", False) and (directory / name).exists():
                         results.append({"name": name, "ok": False, "error": "文件已存在，需明确允许替换"})
                         continue
+                    # 落盘统一为规范形态：token 别名折叠为官方字段名，运行时只读 accessToken
+                    content = json.dumps(auth_oauth.normalize_cred_data(data),
+                                         ensure_ascii=False).encode("utf-8")
                     gateway._store_credential(directory, name, content, uid, replace_existing=body.get("replace", False))
                     results.append({"name": name, "ok": True})
                 except Exception:

@@ -160,6 +160,17 @@ class EndpointTests(unittest.TestCase):
             body = response.json()
             self.assertEqual(body["type"], "error")
             self.assertEqual(body["error"]["type"], "authentication_error")
+            # Anthropic 约定 404 → not_found_error，即使内层写的是 invalid_request_error
+            converter.CONFIG["model_guard"] = True
+            try:
+                missing = self.client.post("/v1/messages", json={
+                    "model": "no-such-model", "max_tokens": 64,
+                    "messages": [{"role": "user", "content": "hi"}]},
+                    headers={"Authorization": "Bearer secret"})
+                self.assertEqual(missing.status_code, 404, missing.text)
+                self.assertEqual(missing.json()["error"]["type"], "not_found_error")
+            finally:
+                converter.CONFIG["model_guard"] = False
             response = self.client.get("/admin/credentials")
             self.assertEqual(response.status_code, 401, response.text)
             self.assertIn("detail", response.json())
@@ -221,8 +232,22 @@ class EndpointTests(unittest.TestCase):
                 response = self.client.post(ROUTES[0], json=nonstream)
                 self.assertEqual(response.status_code, 502, response.text)
                 self.assertEqual(len(self.requests), 1)  # 预算 0：不重试
+                # 耗尽预算的末次生成也必须带着用量出现在 attempts 里
+                exhausted = [kw for stage, kw in attempts if stage == "tool_args_exhausted"]
+                self.assertEqual(len(exhausted), 1)
+                self.assertIn("total_tokens", exhausted[0])
             finally:
                 converter.CONFIG["tool_call_max_retry"] = 3
+
+    def test_credential_selection_runs_off_the_event_loop(self):
+        """_route_chat 内含线程锁/文件锁/同步刷新：三个端点都必须经线程池调用它。"""
+        import inspect
+        import re
+        src = inspect.getsource(converter)
+        direct = re.findall(r"^\s+(?:body|chat_body), cred, headers, url = _route_chat\(", src, re.M)
+        pooled = re.findall(r"await run_in_threadpool\(_route_chat", src)
+        self.assertEqual(direct, [])
+        self.assertEqual(len(pooled), 3)
 
     def test_tool_metadata_policy_reaches_all_protocols(self):
         description = "Read sandbox data without destructive changes."
@@ -555,10 +580,214 @@ class TransportBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 1)
 
 
+class InboundBodyLimitTests(unittest.TestCase):
+    """入站原始字节限量：解析前 413，chunked 同样受限，/admin 不受影响。"""
+
+    def _app(self, limit):
+        from app.inbound_limits import InboundBodyLimitMiddleware
+        from fastapi import Request
+        app = FastAPI()
+
+        @app.post("/v1/chat/completions")
+        async def inference(request: Request):
+            return {"size": len(await request.body())}
+
+        @app.post("/admin/x")
+        async def admin(request: Request):
+            return {"size": len(await request.body())}
+
+        app.add_middleware(InboundBodyLimitMiddleware, config={"max_inbound_bytes": limit})
+        return TestClient(app)
+
+    def test_over_limit_rejected_before_parsing_and_under_limit_passes(self):
+        client = self._app(1024)
+        ok = client.post("/v1/chat/completions", json={"messages": []})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        big = client.post("/v1/chat/completions", content=b"x" * 2048,
+                          headers={"Content-Type": "application/json"})
+        self.assertEqual(big.status_code, 413)
+        self.assertEqual(big.json()["error"]["code"], "request_too_large")
+        self.assertNotIn("detail", big.json())
+        big_admin = client.post("/admin/x", content=b"x" * 2048)
+        self.assertEqual(big_admin.status_code, 200)  # 管理路由不在此限量范围
+
+    def test_chunked_body_is_counted_and_rejected(self):
+        from app.inbound_limits import InboundBodyLimitMiddleware
+        reached = []
+
+        async def app(scope, receive, send):
+            reached.append(True)
+
+        middleware = InboundBodyLimitMiddleware(app, {"max_inbound_bytes": 10})
+        chunks = [{"type": "http.request", "body": b"12345678", "more_body": True},
+                  {"type": "http.request", "body": b"9" * 8, "more_body": False}]
+        sent = []
+
+        async def receive():
+            return chunks.pop(0) if chunks else {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+
+        import asyncio
+        asyncio.run(middleware({"type": "http", "method": "POST", "path": "/v1/chat/completions"}, receive, send))
+        self.assertFalse(reached)  # 超限请求不进入下游
+        self.assertEqual(sent[0]["status"], 413)
+
+
+class InboundStreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def exercise_stream(self, path, disconnect=False):
+        from app.inbound_limits import ConcurrencyLimitMiddleware, InboundBodyLimitMiddleware
+        from starlette.responses import StreamingResponse
+
+        disconnected = asyncio.Event()
+        closed = asyncio.Event()
+        chunks = [{"type": "http.request", "body": b"{", "more_body": True},
+                  {"type": "http.request", "body": b"}", "more_body": False}]
+        sent = []
+
+        async def receive():
+            if chunks:
+                return chunks.pop(0)
+            await disconnected.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+            if disconnect and message["type"] == "http.response.body" and message.get("body"):
+                disconnected.set()
+
+        async def stream():
+            try:
+                yield b"data: first\n\n"
+                if disconnect:
+                    await asyncio.Event().wait()
+                else:
+                    await asyncio.sleep(0)
+                    yield b"data: [DONE]\n\n"
+            finally:
+                closed.set()
+
+        async def app(scope, receive, send):
+            request = await receive()
+            self.assertEqual(request["body"], b"{}")
+            self.assertFalse(request["more_body"])
+            await StreamingResponse(stream(), media_type="text/event-stream")(scope, receive, send)
+
+        config = {"max_inbound_bytes": 1024, "max_concurrent": 1}
+        middleware = ConcurrencyLimitMiddleware(InboundBodyLimitMiddleware(app, config), config)
+        scope = {"type": "http", "method": "POST", "path": path,
+                 "asgi": {"version": "3.0", "spec_version": "2.3"}}
+        await asyncio.wait_for(middleware(scope, receive, send), 2)
+        self.assertTrue(closed.is_set())
+        self.assertFalse(middleware._gate().locked())
+        body = b"".join(m.get("body", b"") for m in sent)
+        self.assertIn(b"data: first", body)
+        if disconnect:
+            self.assertNotIn(b"[DONE]", body)
+        else:
+            self.assertIn(b"[DONE]", body)
+            self.assertFalse(sent[-1].get("more_body", False))
+
+    async def test_buffered_requests_keep_streaming_until_completion(self):
+        for path in ROUTES:
+            with self.subTest(path=path):
+                await self.exercise_stream(path)
+
+    async def test_real_disconnect_closes_the_stream_and_releases_capacity(self):
+        await self.exercise_stream("/v1/messages", disconnect=True)
+
+
+
+class ConcurrencyLimitTests(unittest.IsolatedAsyncioTestCase):
+    """并发上限：名额占满立即 503（含 Retry-After），释放后恢复。"""
+
+    async def test_full_gate_returns_503_and_recovers(self):
+        from app.inbound_limits import ConcurrencyLimitMiddleware
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_app(scope, receive, send):
+            entered.set()
+            await release.wait()
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        mw = ConcurrencyLimitMiddleware(slow_app, {"max_concurrent": 1})
+        scope = {"type": "http", "method": "POST", "path": "/v1/chat/completions"}
+
+        async def receive():
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        first = asyncio.create_task(mw(scope, receive, send))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            for path in ROUTES:
+                with self.subTest(path=path):
+                    sent.clear()
+                    await mw({**scope, "path": path}, receive, send)
+                    self.assertEqual(sent[0]["status"], 503)
+                    headers = dict(sent[0]["headers"])
+                    self.assertEqual(headers[b"retry-after"], b"3")
+                    body = sent[1]["body"]
+                    self.assertEqual(int(headers[b"content-length"]), len(body))
+                    payload = json.loads(body)
+                    self.assertEqual(payload["error"]["code"], "concurrency_limit")
+                    if path == "/v1/messages":
+                        self.assertEqual(payload["type"], "error")
+                        self.assertEqual(payload["error"]["type"], "api_error")
+                    else:
+                        self.assertNotIn("type", payload)
+                        self.assertEqual(payload["error"]["type"], "rate_limit_error")
+        finally:
+            release.set()
+            await asyncio.wait_for(first, 2)
+        sent.clear()
+        await mw(scope, receive, send)
+        self.assertEqual(sent[0]["status"], 200)
+
+
+class AuxiliaryCapacityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_saturated_generation_gate_does_not_block_token_counting(self):
+        from app.inbound_limits import ConcurrencyLimitMiddleware
+
+        middleware = ConcurrencyLimitMiddleware(converter.app, {"max_concurrent": 1})
+        gate = middleware._gate()
+        await gate.acquire()
+        try:
+            with patch.dict(converter.CONFIG, {"api_key": ""}):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=middleware),
+                                             base_url="http://test") as client:
+                    response = await client.post("/v1/messages/count_tokens", json={
+                        "model": "auto", "messages": [{"role": "user", "content": "hello"}]})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertGreater(response.json()["input_tokens"], 0)
+                    unknown = await client.post("/v1/messages/unknown", json={})
+                    self.assertEqual(unknown.status_code, 404)
+                    wrong_method = await client.get("/v1/messages")
+                    self.assertEqual(wrong_method.status_code, 405)
+            self.assertTrue(gate.locked())
+        finally:
+            gate.release()
+
+
+
 class ConfigurationTests(unittest.TestCase):
-    def configure(self, env=None, flags=(), invalid=False):
+    def configure(self, env=None, flags=(), invalid=False, stored=None, expected_host=None):
         with contextlib.ExitStack() as stack:
             directory = stack.enter_context(tempfile.TemporaryDirectory())
+            if stored:
+                from app.control_store import ControlStore
+                store = ControlStore(Path(directory) / "control.sqlite3")
+                try:
+                    store.update_settings(stored, store.snapshot()["revision"])
+                finally:
+                    store.close()
             stack.enter_context(patch.object(converter, "managed_auth_dir", return_value=Path(directory)))
             stack.enter_context(patch.object(converter, "app", FastAPI()))
             stack.enter_context(patch.dict(os.environ, env or {}, clear=True))
@@ -570,15 +799,21 @@ class ConfigurationTests(unittest.TestCase):
             stack.enter_context(patch.object(converter, "credits_mod", None))
             stack.enter_context(patch.object(converter.threading, "Thread"))
             server = stack.enter_context(patch.object(converter.uvicorn, "run"))
+            from app import runtime_management
+            close = stack.enter_context(patch.object(runtime_management, "close", wraps=runtime_management.close))
             if invalid:
                 with self.assertRaises(SystemExit) as caught:
                     converter.main()
                 self.assertEqual(caught.exception.code, 2)
                 seed.assert_not_called()
                 server.assert_not_called()
+                if stored:
+                    close.assert_called_once_with(converter.CONFIG)
                 return
             converter.main()
             server.assert_called_once()
+            if expected_host is not None:
+                self.assertEqual(server.call_args.kwargs["host"], expected_host)
             return {key: converter.CONFIG[key] for key in (
                 "max_images", "image_policy", "max_request_bytes", "log_body_limit", "admin_csrf", "keep_tool_metadata")}
 
@@ -586,6 +821,27 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(self.configure(), {"max_images": 16, "image_policy": "truncate",
                                            "max_request_bytes": 33554432, "log_body_limit": 65536,
                                            "admin_csrf": True, "keep_tool_metadata": False})
+
+    def test_open_binding_without_key_requires_explicit_opt_in(self):
+        # 非回环 + 空 key：默认拒启（SystemExit 2）
+        self.configure(flags=("--host", "0.0.0.0"), invalid=True)
+        # 显式放行环境变量后可启动
+        self.configure(env={"CODEBUDDY2API_ALLOW_OPEN_NOAUTH": "true"}, flags=("--host", "0.0.0.0"))
+        # 非回环但设了 key：正常
+        self.configure(env={"CODEBUDDY2API_KEY": "k"}, flags=("--host", "0.0.0.0"))
+
+    def test_persisted_host_is_validated_after_configuration_resolution(self):
+        for host in ("0.0.0.0", "::"):
+            with self.subTest(host=host):
+                self.configure(stored={"host": host}, invalid=True)
+                self.configure(stored={"host": host}, env={"CODEBUDDY2API_KEY": "k"}, expected_host=host)
+                self.configure(stored={"host": host}, env={"CODEBUDDY2API_ALLOW_OPEN_NOAUTH": "true"},
+                               expected_host=host)
+        self.configure(stored={"host": "0.0.0.0"}, flags=("--host", "127.0.0.1"), expected_host="127.0.0.1")
+        self.configure(stored={"host": "127.0.0.1"}, flags=("--host", "0.0.0.0"), invalid=True)
+        self.configure(stored={"host": "0.0.0.0"}, env={"CODEBUDDY2API_KEY": ""},
+                       flags=("--api-key", "k"), expected_host="0.0.0.0")
+
 
     def test_environment_and_explicit_cli_precedence(self):
         env = {"CODEBUDDY2API_MAX_IMAGES": "8", "CODEBUDDY2API_IMAGE_POLICY": "error",

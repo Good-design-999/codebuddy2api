@@ -43,6 +43,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler as _default_http_exception_handler
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 import uvicorn
 
 try:
@@ -71,7 +72,8 @@ from app.observability import (AuditMiddleware, observe_route, observe_usage,
                                observe_attempt, observe_failure)
 from app.credential_io import (CredentialFileError, read_import_file, atomic_write_credential,
                                credential_file_lock)
-from app.upstream_io import ChatSSEAccumulator, UpstreamResponseError, open_backend_stream
+from app.upstream_io import ChatSSEAccumulator, UpstreamResponseError, open_backend_stream, read_bounded_error
+from app.inference_auth import require_api_key
 from app.content_filter import ContentFilterDetector, is_filter_error
 from app.request_limits import ImageLimitError, apply_image_policy
 from app.safe_logging import format_log_body, sanitize_log_text
@@ -1239,12 +1241,10 @@ def _publish_usage_daily(pool, stale=()):
     used, count = 0.0, 0
     partial = False
     newest = 0.0
-    included = False
     stale_out = []
     for cred_id, snap in accounts.items():
         if cred_id not in enabled:
             continue
-        included = True
         site = snap.get("site") or "domestic"
         group = groups.setdefault(site, {"by_day": {}, "total_credits": 0.0, "requests": 0})
         for day, models in (snap.get("by_day") or {}).items():
@@ -1260,11 +1260,12 @@ def _publish_usage_daily(pool, stale=()):
         newest = max(newest, float(snap.get("fetched_at") or 0))
         if snap.get("partial"):
             partial = True
-        if cred_id in stale:
+    # 本轮失败的启用账号即使没有任何历史快照也必须可见，否则不完整聚合被当成精确值
+    for cred_id in stale:
+        if cred_id in enabled:
             partial = True
             stale_out.append(Path(cred_id).name)
-    if not included:
-        return  # 还没有任何成功快照：不覆盖已有视图
+    # 无成功快照也发布完整性标记；fetched_at=0 使账务继续使用额度差回退。
     for group in groups.values():
         group["total_credits"] = round(group["total_credits"], 2)
     out = {"by_day": by_day, "groups": groups, "total_credits": round(used, 2),
@@ -1273,7 +1274,7 @@ def _publish_usage_daily(pool, stale=()):
         out["stale_accounts"] = sorted(stale_out)
     CONFIG["usage_daily"] = out
     _log(f"[usage] 明细已同步: {count} 请求 / {used:.2f} credits"
-         + (f" | {len(stale_out)} 账号保留历史快照" if stale_out else ""))
+         + (f" | {len(stale_out)} 账号同步失败" if stale_out else ""))
 
 
 def _housekeep_once(pool: CredentialPool, ledger, *, pending_only=False):
@@ -1373,7 +1374,9 @@ async def _protocol_http_exception(request: Request, exc: HTTPException):
     if path.startswith("/v1/messages"):
         # Anthropic：{"type": "error", "error": {...}}；上游业务 code 原样保留，客户端仍可识别 content_filter
         etype = _ANTHROPIC_ERROR_TYPES.get(str(err.get("type") or ""))
-        if etype is None:
+        if exc.status_code == 404:
+            etype = "not_found_error"  # Anthropic 约定：404 恒为 not_found_error
+        elif etype is None:
             etype = "api_error" if exc.status_code >= 500 else "invalid_request_error"
         error_obj = {**err, "type": etype, "message": message}  # code/param/image_count 等结构化字段原样保留
         return JSONResponse({"type": "error", "error": error_obj},
@@ -1392,6 +1395,8 @@ CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "model_guard": True,     # 表外模型本地拦截，不转发上游
                 "max_images": 16, "image_policy": "truncate",
                 "max_request_bytes": 32 * 1024 * 1024, "log_body_limit": 65536,
+                "max_inbound_bytes": 64 * 1024 * 1024,
+                "max_collect_bytes": 8 * 1024 * 1024, "max_concurrent": 64,
                 "usage_daily": None,     # 官方用量聚合视图（日期×模型 credit），供 billing/usage 出 daily_costs
                 "usage_daily_accounts": None,  # 按账号的用量快照；单账号失败不丢历史
                 "credit_price_cny": None, "credit_price_usd": None, "usd_rate": None,
@@ -1464,16 +1469,7 @@ def _truncate(s: str, n: int = 80) -> str:
 
 
 def _check_auth(authorization: Optional[str], x_api_key: Optional[str]):
-    key = CONFIG["api_key"]
-    if not key:
-        return
-    token = ""
-    if isinstance(authorization, str) and authorization.startswith("Bearer "):
-        token = authorization[7:].strip()
-    if not token and isinstance(x_api_key, str):
-        token = x_api_key
-    if not secrets.compare_digest(token.encode(), key.encode()):
-        raise HTTPException(status_code=401, detail={"error": {"message": "invalid api key", "type": "auth_error"}})
+    require_api_key(CONFIG["api_key"], authorization, x_api_key)
 
 
 def _check_admin_auth(authorization: Optional[str], x_api_key: Optional[str]):
@@ -1626,13 +1622,15 @@ async def admin_add_credential(request: Request,
     import_dir = Path(os.environ.get("CODEBUDDY_IMPORT_DIR") or dst_dir / "imports")
     try:
         name, content = read_import_file(import_dir, body.get("path"))
-        cred_data = json.loads(content.decode("utf-8"))
+        cred_data = auth_oauth.loads_strict(content.decode("utf-8"))
         src_uid, verr = auth_oauth.validate_cred_data(cred_data)
         if verr:
             raise CredentialFileError("凭据格式或站点校验失败")
         if (not isinstance(cred_data.get("account") or {}, dict)
                 or not isinstance(cred_data["auth"].get("expiresAt", 0), (int, float))):
             raise CredentialFileError("凭据账号或过期时间格式无效")
+        # 与上传路径一致：落盘前折叠 token 别名为官方字段名
+        content = json.dumps(auth_oauth.normalize_cred_data(cred_data), ensure_ascii=False).encode("utf-8")
     except CredentialFileError:
         raise HTTPException(status_code=400, detail={"error": {"message": "凭据文件不符合导入要求", "type": "invalid_request_error"}}) from None
     except (ValueError, UnicodeError, RecursionError):
@@ -1840,6 +1838,9 @@ def billing_subscription(authorization: Optional[str] = Header(default=None),
         "codebuddy_balance_usd": t["remaining_usd"],
         "codebuddy_balance_cny": t["remaining_cny"],
         "codebuddy_sites": t["groups"],
+        # 余额/用量不完整（分页到顶或账号同步失败）时调用方必须能看到
+        "codebuddy_partial": t["partial"],
+        **({"codebuddy_stale_accounts": stale} if (stale := (CONFIG.get("usage_daily") or {}).get("stale_accounts")) else {}),
     }
 
 
@@ -2297,7 +2298,8 @@ async def chat_completions(request: Request,
     _log(f"[{rid}] ▶ REQUEST {model_name} | stream={client_wants_stream} | msgs={len(messages)}"
          + (f" | tools={tool_names}" if tool_names else "")
          + (f" | last_user={_truncate(last_user, 60)!r}" if last_user else ""))
-    body, cred, headers, url = _route_chat(payload, body, rid)
+    # 凭据选择/到期刷新持线程锁与文件锁并可能同步访问网络：放到受限线程池，不占事件循环
+    body, cred, headers, url = await run_in_threadpool(_route_chat, payload, body, rid)
     _log_json(f"[{rid}] REQUEST BODY (发往后端，预览)", body)
     t0 = time.time()
 
@@ -2427,7 +2429,7 @@ def _tool_calls_healthy(tool_calls, body: dict | None = None) -> bool:
 
 def _merge_chat_sse_text(text: str) -> dict:
     """文本路径与异步流路径使用同一聚合器。"""
-    accumulator = ChatSSEAccumulator()
+    accumulator = ChatSSEAccumulator(max_collect_bytes=CONFIG.get("max_collect_bytes", 0))
     for line in text.splitlines():
         accumulator.feed_line(line)
     return accumulator.result()
@@ -2545,11 +2547,11 @@ async def _fetch_checked_chat(url, headers, body, model_name, rid, cred=None, *,
     tool_attempt = 0
     filter_retried = False
     while True:
-        accumulator = ChatSSEAccumulator()
+        accumulator = ChatSSEAccumulator(max_collect_bytes=CONFIG.get("max_collect_bytes", 0))
         rejection = None
         async with _backend_stream(url, headers, body, rid=rid, model_name=model_name) as response:
             if response.status_code != 200:
-                _check_upstream_status(response.status_code, await response.aread(), cred, body.get("model"))
+                _check_upstream_status(response.status_code, await read_bounded_error(response), cred, body.get("model"))
             else:
                 _note_cred_model_ok(cred, body.get("model"))
             try:
@@ -2588,6 +2590,11 @@ async def _fetch_checked_chat(url, headers, body, model_name, rid, cred=None, *,
         # 审核拒绝不是工具损坏，不因 required 工具选择而重复生成。
         budget = CONFIG.get("tool_call_max_retry", _TOOL_CALL_MAX_RETRY)
         if detector.detected or not body.get("tools") or tool_attempt >= budget:
+            if not detector.detected and body.get("tools"):
+                # 耗尽预算的末次生成同样消耗额度：记入 attempts 再报错
+                exhausted = result.get("usage") or {}
+                observe_attempt("tool_args_exhausted", attempt=tool_attempt, max_attempts=budget,
+                                total_tokens=exhausted.get("total_tokens"))
             raise UpstreamResponseError(502, b"Invalid upstream tool_calls after retries")
         tool_attempt += 1
         # 被丢弃的这次生成也是真实消耗：连同序号记进 attempts，账务不再只看见最后一次
@@ -2610,7 +2617,7 @@ async def _chat_sse_lines(url, headers, body, model_name, t0, rid, cred=None, *,
     budget = CONFIG["log_body_limit"] if CONFIG.get("log_path") else 0
     async with _backend_stream(url, headers, body, rid=rid, model_name=model_name) as response:
         if response.status_code != 200:
-            _check_upstream_status(response.status_code, await response.aread(), cred, body.get("model"))
+            _check_upstream_status(response.status_code, await read_bounded_error(response), cred, body.get("model"))
         else:
             _note_cred_model_ok(cred, body.get("model"))
         async for line in response.aiter_lines():
@@ -2727,7 +2734,8 @@ async def create_response(request: Request,
         f"| dropped_harness={projection_stats.get('dropped_harness_messages', 0)} "
         f"| anchor_user={projection_stats.get('anchor_user_preserved', False)}"
     )
-    chat_body, cred, headers, url = _route_chat(payload, chat_body, rid)
+    # 同上：凭据选择/刷新是阻塞操作，移出事件循环
+    chat_body, cred, headers, url = await run_in_threadpool(_route_chat, payload, chat_body, rid)
     _log_json(f"[{rid}] RESPONSES → CHAT BODY (预览)", chat_body)
     t0 = time.time()
 
@@ -2821,7 +2829,8 @@ async def create_message(request: Request,
     chat_messages = chat_body.get("messages", [])
     rid = os.urandom(4).hex()
     _log(f"[{rid}] ▶ ANTHROPIC {model_name} | msgs={len(chat_messages)} | anthropic_msgs={len(messages)}")
-    chat_body, cred, headers, url = _route_chat(payload, chat_body, rid)
+    # 同上：凭据选择/刷新是阻塞操作，移出事件循环
+    chat_body, cred, headers, url = await run_in_threadpool(_route_chat, payload, chat_body, rid)
     _log_json(f"[{rid}] ANTHROPIC → CHAT BODY (预览)", chat_body)
     t0 = time.time()
 
@@ -3027,6 +3036,15 @@ def main():
     ap.add_argument("--max-request-bytes", type=_positive_int, metavar="BYTES",
                     default=os.environ.get("CODEBUDDY2API_MAX_REQUEST_BYTES", str(32 * 1024 * 1024)),
                     help="图片处理与适配后请求体的字节上限，默认 32 MiB")
+    ap.add_argument("--max-inbound-bytes", type=_positive_int, metavar="BYTES",
+                    default=os.environ.get("CODEBUDDY2API_MAX_INBOUND_BYTES", str(64 * 1024 * 1024)),
+                    help="入站原始请求体字节上限（解析前生效，含 chunked），默认 64 MiB")
+    ap.add_argument("--max-collect-bytes", type=_nonnegative_int, metavar="BYTES",
+                    default=os.environ.get("CODEBUDDY2API_MAX_COLLECT_BYTES", str(8 * 1024 * 1024)),
+                    help="聚合路径输出收集总字节上限（正文+思考+工具参数），默认 8 MiB；0 不限制")
+    ap.add_argument("--max-concurrent", type=_nonnegative_int, metavar="N",
+                    default=os.environ.get("CODEBUDDY2API_MAX_CONCURRENT", "64"),
+                    help="推理端点并发上限（超出立即 503），默认 64；0 不限制")
     ap.add_argument("--log-body-limit", type=_nonnegative_int, metavar="BYTES",
                     default=os.environ.get("CODEBUDDY2API_LOG_BODY_LIMIT", "65536"),
                     help="每条正文日志的预览字节上限，默认 64 KiB；0 只记录摘要")
@@ -3043,7 +3061,7 @@ def main():
         return login(site=args.site, open_browser=not args.no_browser)
 
     for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit", "auto_trial",
-                "tool_call_max_retry"):
+                "tool_call_max_retry", "max_inbound_bytes", "max_collect_bytes", "max_concurrent"):
         CONFIG[key] = getattr(args, key)
     CONFIG["api_key"] = args.api_key
     CONFIG["desensitize"] = args.desensitize
@@ -3056,6 +3074,12 @@ def main():
     CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2API_LOG")
     from app import runtime_management
     runtime_management.initialize(sys.modules[__name__], args)
+    # 持久化设置解析后再核对实际监听地址和生效 key，且必须早于凭据扫描、线程及监听。
+    if (args.host not in ("127.0.0.1", "::1", "localhost") and not CONFIG.get("api_key")
+            and os.environ.get("CODEBUDDY2API_ALLOW_OPEN_NOAUTH", "").lower() not in ("1", "true", "yes")):
+        runtime_management.close(CONFIG)
+        ap.error("非回环绑定且未设置 API key 会匿名开放推理额度；"
+                 "请设置 CODEBUDDY2API_KEY，或确知风险后以 CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true 显式放行")
     files = [Path(p) for p in args.auth_file]
     if not files:
         seed_credentials()  # 自管模式：启动时把桌面端缺失凭据复制进 auth/

@@ -449,6 +449,13 @@ def test_tool_result_is_error_is_preserved():
     assert conv(True).startswith("[tool execution failed]\nexit 1")
     assert conv(False) == "exit 1"
     assert conv(None) == "exit 1"
+    # 含图片的失败结果：标记为前置文本块，不做字符串拼接
+    req = {"model": "auto", "max_tokens": 64, "messages": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_2", "is_error": True, "content": [
+            {"type": "image", "source": {"type": "url", "url": "https://synthetic.invalid/x.png"}},
+            {"type": "text", "text": "boom"}]}]}]}
+    content = anthropic_request_to_chat(req)["messages"][0]["content"]
+    assert isinstance(content, list) and content[0] == {"type": "text", "text": "[tool execution failed]"}
     print("✅ test_tool_result_is_error_is_preserved")
 
 

@@ -30,6 +30,9 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 | `--max-images` | `16` | Total images per request; `0` permits no images |
 | `--image-policy` | `truncate` | Keep newest images; `error` rejects excess images with 413 |
 | `--tool-call-max-retry` | `3` | Extra generations after malformed tool calls (each consumes credits); `0` disables retries |
+| `--max-inbound-bytes` | `67108864` | Raw body limit for generation and token-count POSTs, before parsing (chunked included); other routes are not buffered; 413 beyond it |
+| `--max-collect-bytes` | `8388608` | Total collection budget for aggregated output (content + reasoning + tool arguments); `response_too_large` beyond it; `0` disables |
+| `--max-concurrent` | `64` | Concurrency limit for the three generation endpoints only; excess requests get 503 with Retry-After; token counting is unaffected; `0` disables |
 | `--max-request-bytes` | `33554432` | Positive byte limit for the processed upstream JSON |
 | `--log-body-limit` | `65536` | Text-log body preview bytes; `0` logs summaries only, not the SQLite diagnostic budget |
 
@@ -133,10 +136,17 @@ Credential domain / token issuer determine the product identity. Chat and refres
 - `/v1/messages/count_tokens` returns a character-based heuristic estimate for budgeting, not an exact count.
 - Text logs and SQLite auditing have separate budgets. Logs contain bounded, redacted previews, not complete original requests. Treat logs, credential exports and backups as private data.
 
+## Deployment exposure and credential intake
+
+- The compose port mapping binds loopback by default (`CODEBUDDY2API_BIND` defaults to 127.0.0.1); after resolving CLI, environment and saved settings, a native non-loopback bind with an empty effective API key refuses to start unless `CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true` is set explicitly.
+- When a key is configured, generation and token-count POSTs verify request headers before buffering bodies or reserving inference capacity; invalid keys return 401 even while generation slots are full. Other routes retain their existing authentication and routing behavior.
+- Credential imports/uploads persist the normalized form (token aliases folded into the canonical fields); strict JSON parsing rejects NaN/Infinity, and `expiresAt`/`lastRefreshTime` must be plausible finite millisecond timestamps.
+
 ## Billing data integrity
 
 - Balances and usage are paginated in full; when a page cap is hit or an account's sync fails, responses carry `partial: true` (and `stale_accounts`) instead of pretending to be exact.
 - A failed account keeps its last good snapshot; HTTP 200 responses with a failing business code or missing structure are treated as errors and never overwrite history.
+- If every account fails before a first snapshot, both billing endpoints still report partial data and stale accounts; quota-delta fallback remains in use. Existing account snapshots retain their original fetch time on failures.
 - daily_costs are priced per site per day at that site's price, not at one blended average.
 
 ## Troubleshooting and retries
