@@ -474,13 +474,43 @@ def usd_per_credit(is_intl: bool, price_cny: float = CREDIT_PRICE_CNY,
     return price_usd if is_intl else price_cny / rate
 
 
+def dedupe_by_identity(creds_snapshot: dict) -> dict:
+    """按账号身份折叠 ledger 快照：同一身份只保留一条余额记录。
+
+    键是凭据绝对路径，只作索引不作身份（见 CreditLedger.bind_identity）：换
+    CODEBUDDY_AUTH_DIR、搬动项目目录或同一份凭据被重复登记时，同一账号会在多个键下
+    各留一份余额，而积分属于账号、不属于文件，逐键相加会把一份余额算好几次。
+    取舍优先级：有分段数据 > 无数据，其次 fetched_at 更新。未绑定身份的历史条目
+    无法安全判定归属，原样保留。"""
+    winners: dict[str, tuple] = {}
+    for cred_id, entry in (creds_snapshot or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        identity = str(entry.get("identity") or "")
+        if not identity:
+            continue          # 未绑定身份：归属未知，不参与合并
+        balance = entry.get("credits") or {}
+        rank = (bool(balance.get("segments")), float(balance.get("fetched_at") or 0.0))
+        if identity not in winners or rank > winners[identity][0]:
+            winners[identity] = (rank, cred_id)
+    keep = {cred_id for _, cred_id in winners.values()}
+    out = {}
+    for cred_id, entry in (creds_snapshot or {}).items():
+        identity = str(entry.get("identity") or "") if isinstance(entry, dict) else ""
+        if identity and cred_id not in keep:      # 同身份的落选路径
+            continue
+        out[cred_id] = entry
+    return out
+
+
 def aggregate_credits(creds_snapshot: dict) -> dict:
     """汇总 ledger 快照，并按国内/国际分组（两站积分独立、单价不同，必须分组折算）。
 
-    顶层为合计值，groups 内为各组明细；含剩余、额度差已用、最早过期时间。"""
+    顶层为合计值，groups 内为各组明细；含剩余、额度差已用、最早过期时间。
+    同一账号在多个凭据路径下重复记账时只算一次，见 dedupe_by_identity。"""
     groups = {k: {"remaining": 0.0, "used_by_quota": 0.0, "soonest_expiry": None}
               for k in ("domestic", "international")}
-    for e in (creds_snapshot or {}).values():
+    for e in dedupe_by_identity(creds_snapshot).values():
         c = e.get("credits") or {}
         g = groups["international" if c.get("intl") else "domestic"]
         for s in c.get("segments") or []:
