@@ -202,6 +202,23 @@ class PoolRoutingTests(unittest.TestCase):
         (picked_cm, _), _headers = self.cred_for(model=OTHER_MODEL)
         self.assertIn(picked_cm, [cm for cm, _ in self.by_endpoint.values()])
 
+    def test_block_is_reported_when_only_one_backend_lists_the_model(self):
+        """目录里只有一个后端能服务它，而那个后端已避让：回 404，不要给下游可重试的 503。"""
+        converter.CONFIG["model_catalogs"][INTL_PROFILE] = [
+            {"id": OTHER_MODEL, "name": OTHER_MODEL, "supportsToolCall": True,
+             "credits": {"input": 1, "output": 2}}]
+        converter.invalidate_model_table()
+        cm, _ = self.by_endpoint[DOMESTIC_ENDPOINT]
+        self.pool.note_status(cm, 404, model=MODEL, raw=_error_body(11102, "service info not found"))
+        self.assertIsNotNone(self.pool.model_block_until(MODEL), "唯一能服务它的后端已避让")
+        with self.assertRaises(HTTPException) as caught:
+            self.cred_for()
+        self.assertEqual(caught.exception.status_code, 404)
+        self.assertIn(MODEL, caught.exception.detail["error"]["message"])
+        # 国际站目录里还有的模型照常派发，避让没有被扩大化。
+        (picked_cm, _), _headers = self.cred_for(model=OTHER_MODEL)
+        self.assertIn(picked_cm, [cm for cm, _ in self.by_endpoint.values()])
+
     def test_region_scoped_fast_failure(self):
         """只在国际站内全部避让时才拒 intl 请求；cn 请求照旧通过。"""
         cm, _ = self.by_endpoint[INTL_ENDPOINT]

@@ -325,10 +325,17 @@ def fetch_credits(access_token: str, uid: str = "", domain: str = "") -> dict:
 
 
 
-def select_product_models(data: dict, product: str = "cli") -> list[dict]:
-    """按产品对话 agent 解析模型；未声明名单兼容根表，显式空可用表不兜底。"""
+def select_product_models(data: dict, product: str = "cli", *, scope: str = "picker") -> list[dict]:
+    """按产品对话 agent 解析模型；未声明名单兼容根表，显式空可用表不兜底。
+
+    scope="picker" 给出该 agent 声明的名字，也就是官方客户端模型选择器展示的那一批；
+    scope="account" 跳过 agent 裁剪，给出该账号 token 能取到的全量根表。子集说的是
+    「客户端要展示什么」，不是「后端能服务什么」，拿它当能力表会把真实可用的模型判成不存在。
+    """
     if product not in ("cli", "workbuddy"):
         raise ValueError("未知模型目录产品")
+    if scope not in ("picker", "account"):
+        raise ValueError("未知模型目录作用域")
     def invalid(field: str):
         raise ValueError(f"模型配置格式错误: {field}")
 
@@ -384,7 +391,7 @@ def select_product_models(data: dict, product: str = "cli") -> list[dict]:
         default = next((agent for agent in data["agents"] if "default" in (agent.get("tags") or [])), None)
         fallback = next((agent for agent in data["agents"] if isinstance(agent.get("models"), list) and agent["models"]), None)
         cli = default or cli or fallback
-    if cli is None or "models" not in cli:
+    if scope == "account" or cli is None or "models" not in cli:
         return finish(models)
     if not isinstance(cli["models"], list):
         invalid("data.agents.cli.models")
@@ -414,9 +421,15 @@ def select_cli_models(data: dict) -> list[dict]:
     return select_product_models(data, "cli")
 
 
-def fetch_model_catalog(access_token: str, user_agent: str = "", *, domain: str = "",
-                        uid: str = "", enterprise_id: str = "") -> list[dict]:
-    """按凭据产品使用专属入口和目录请求头，不混用 CLI/WorkBuddy 视图。"""
+def fetch_model_scopes(access_token: str, user_agent: str = "", *, domain: str = "",
+                       uid: str = "", enterprise_id: str = "") -> dict[str, list[dict]]:
+    """按凭据产品一次拉取 /v3/config，返回 {"picker":…,"account":…} 两个作用域。
+
+    picker 是 agent 声明的选择器子集，account 是同一份响应里的账号根表。实测差距很大：
+    2026-09-14 国内账号根表 30 个、agents[cli] 只剩 16 个，被裁掉的 hy4-preview、
+    deepseek-v3-2-volc、glm-4.6 直接请求都回 200；而国际账号根表里没有
+    deepseek-v3-2-volc，后端也确实回 400 —— 根表既不多放也不误杀。
+    """
     auth = {"accessToken": access_token, "domain": domain}
     profile = profile_for_auth(auth)
     headers = catalog_headers(auth, {"uid": uid, "enterpriseId": enterprise_id}, user_agent=user_agent)
@@ -437,7 +450,16 @@ def fetch_model_catalog(access_token: str, user_agent: str = "", *, domain: str 
         raise ValueError("模型配置格式错误: response")
     if payload.get("code") != 0:
         raise RuntimeError("模型配置接口返回非成功状态")
-    return select_product_models(payload.get("data"), profile_product(profile))
+    product = profile_product(profile)
+    return {"picker": select_product_models(payload.get("data"), product),
+            "account": select_product_models(payload.get("data"), product, scope="account")}
+
+
+def fetch_model_catalog(access_token: str, user_agent: str = "", *, domain: str = "",
+                        uid: str = "", enterprise_id: str = "") -> list[dict]:
+    """该凭据产品的选择器模型目录；账号可服务的全量见 fetch_model_scopes。"""
+    return fetch_model_scopes(access_token, user_agent, domain=domain, uid=uid,
+                              enterprise_id=enterprise_id)["picker"]
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +729,10 @@ class ModelCatalogCache:
                                                  if d["version"] == self.SCHEMA_VERSION
                                                  and entry.get("version") == self.SCHEMA_VERSION
                                                  else 1)}
+                    # 根表是后加的作用域：形状不对就当没有，不能让一条坏数据毁掉整组目录。
+                    serves = entry.get("serves")
+                    if isinstance(serves, list) and all(isinstance(m, dict) for m in serves):
+                        groups[group]["serves"] = deepcopy(serves)
                 self._data = {"version": self.SCHEMA_VERSION, "groups": groups}
             except (OSError, ValueError):
                 pass  # 无法读取时不清除已载入的目录。
@@ -744,8 +770,16 @@ class ModelCatalogCache:
             g = self._data["groups"].get(group)
             return time.time() - float(g.get("fetched_at") or 0) if g is not None else None
 
-    def put(self, group: str, models: list[dict]):
+    def put(self, group: str, models: list[dict], serves: list[dict] | None = None):
         with self._lock:
-            self._data["groups"][group] = {"models": deepcopy(models), "fetched_at": time.time(),
-                                           "version": self.SCHEMA_VERSION}
+            entry = {"models": deepcopy(models), "fetched_at": time.time(),
+                     "version": self.SCHEMA_VERSION}
+            if serves is not None:
+                entry["serves"] = deepcopy(serves)
+            self._data["groups"][group] = entry
             self._save()
+
+    def serves(self, group: str) -> list[dict]:
+        """该组账号可服务的全量根表；升级前写的缓存没有这一层，返回空由调用方回退子集。"""
+        with self._lock:
+            return deepcopy((self._data["groups"].get(group) or {}).get("serves") or [])

@@ -24,6 +24,11 @@ DOMAINS = {"cn-cli": "www.codebuddy.cn", "cn-work": "www.workbuddy.cn",
            "intl-cli": "www.codebuddy.ai", "intl-work": "www.workbuddy.ai"}
 
 
+def scopes(items):
+    """选择器子集与账号根表来自同一次拉取；测试里让两者相同，只验证账号隔离与调度。"""
+    return {"picker": items, "account": items}
+
+
 def model(name, credits=None):
     value = {"id": name, "supportsToolCall": True}
     if credits is not None:
@@ -56,9 +61,11 @@ class IdentitySyncTests(unittest.TestCase):
         self.enterContext(patch("socket.socket.connect", side_effect=AssertionError("network forbidden")))
         self.enterContext(patch.object(c, "_log"))
         self.credit_fetch = self.enterContext(patch.object(credits, "fetch_credits", side_effect=balance))
-        self.catalog_fetch = self.enterContext(patch.object(credits, "fetch_model_catalog",
-            side_effect=lambda token, **kw: [model("a-only"), model("shared")]
-            if kw["uid"] == "A" else [model("shared")]))
+        self.catalog_fetch = self.enterContext(
+            patch.object(credits, "fetch_model_scopes",
+                         side_effect=lambda token, **kw: scopes(
+                             [model("a-only"), model("shared")] if kw["uid"] == "A"
+                             else [model("shared")])))
         self.addCleanup(c.invalidate_model_table)
 
     def write_credential(self, name="slot.info", **kwargs):
@@ -205,8 +212,8 @@ class IdentitySyncTests(unittest.TestCase):
         tables = {profile: [model("shared"), model(profile + "-only")] for profile in DOMAINS}
         tables["cn-work"].append(model("auto"))
         tables["intl-cli"].append(model("default-model"))
-        self.catalog_fetch.side_effect = lambda token, **kw: tables[
-            next(profile for profile, domain in DOMAINS.items() if domain == kw["domain"])]
+        self.catalog_fetch.side_effect = lambda token, **kw: scopes(tables[
+            next(profile for profile, domain in DOMAINS.items() if domain == kw["domain"])])
         self.sync()
         self.assertEqual(len(c.CONFIG["account_catalogs"]), 4)
         for region in ("cn", "intl"):
@@ -248,7 +255,7 @@ class IdentitySyncTests(unittest.TestCase):
         self.assertIsNone(self.picked_uid("a-only"))
 
     def test_zero_balance_account_leaves_paid_models_but_keeps_free_ones(self):
-        self.catalog_fetch.side_effect = lambda token, **kw: (
+        self.catalog_fetch.side_effect = lambda token, **kw: scopes(
             [model("free-only", credits="x0.00"), model("paid-only", credits="x0.03")]
             if kw["uid"] == "A" else [model("paid-only", credits="x0.03")])
         self.configure(self.write_credential("a.info"), self.write_credential("b.info", uid="B"))
@@ -363,7 +370,7 @@ class IdentitySyncTests(unittest.TestCase):
         def replace_during_catalog(*args, **kwargs):
             self.write_credential(uid="B")
             self.pool.reload([path])
-            return [model("a-only")]
+            return scopes([model("a-only")])
         self.catalog_fetch.side_effect = replace_during_catalog
         self.sync()
         self.assertIsNone(self.cache.age(old_key))
