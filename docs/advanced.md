@@ -126,7 +126,10 @@ Credential domain / token issuer determine the product identity. Chat and refres
 - Images count across all history and tool results, including duplicates, in message/content array order. The default keeps the newest 16, removing only excess images while retaining text and message structure; emptied image content receives a text placeholder.
 - `--image-policy error` returns local `413 / too_many_images`. JSON still over budget after processing returns `413 / request_too_large`, without further text truncation to fit the limit.
 - Image count does not guarantee acceptable individual image sizes or model vision support. URL/base64 images can be converted; Responses image `file_id` is unsupported.
-- Set `stream` explicitly: Chat defaults to non-streaming, Responses/Messages to streaming. Streaming Responses and Chat/Messages with tools aggregate and validate before emitting SSE; not every path forwards tokens in real time.
+- When `stream` is omitted all three endpoints follow the protocol default and return a complete JSON response; `stream` must be a boolean. Streaming Responses and Chat/Messages with tools aggregate and validate before emitting SSE; not every path forwards tokens in real time.
+- Inference errors are shaped per client protocol: OpenAI routes return a top-level `error` object and Messages returns `{"type": "error", ...}`; status codes and `Retry-After` are unchanged.
+- Unsupported capabilities are rejected rather than silently degraded: chat `n` other than 1 and the Responses state fields `previous_response_id`/`conversation` (this gateway keeps no server-side response state) return 400; length-truncated or content-filtered Responses are reported as `incomplete`, never disguised as `completed`.
+- `/v1/messages/count_tokens` returns a character-based heuristic estimate for budgeting, not an exact count.
 - Text logs and SQLite auditing have separate budgets. Logs contain bounded, redacted previews, not complete original requests. Treat logs, credential exports and backups as private data.
 
 ## Troubleshooting and retries
