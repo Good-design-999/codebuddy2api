@@ -30,6 +30,9 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 | `--max-images` | `16` | Total images per request; `0` permits no images |
 | `--image-policy` | `truncate` | Keep newest images; `error` rejects excess images with 413 |
 | `--tool-call-max-retry` | `3` | Extra generations after malformed tool calls (each consumes credits); `0` disables retries |
+| `--max-inbound-bytes` | `67108864` | Raw inbound body byte limit enforced at the ASGI layer before parsing (chunked included); 413 beyond it |
+| `--max-collect-bytes` | `8388608` | Total collection budget for aggregated output (content + reasoning + tool arguments); `response_too_large` beyond it; `0` disables |
+| `--max-concurrent` | `64` | Inference concurrency limit; excess requests get an immediate 503 with Retry-After; `0` disables |
 | `--max-request-bytes` | `33554432` | Positive byte limit for the processed upstream JSON |
 | `--log-body-limit` | `65536` | Text-log body preview bytes; `0` logs summaries only, not the SQLite diagnostic budget |
 
@@ -132,6 +135,11 @@ Credential domain / token issuer determine the product identity. Chat and refres
 - Unsupported capabilities are rejected rather than silently degraded: chat `n` other than 1 and the Responses state fields `previous_response_id`/`conversation` (this gateway keeps no server-side response state) return 400; length-truncated or content-filtered Responses are reported as `incomplete`, never disguised as `completed`.
 - `/v1/messages/count_tokens` returns a character-based heuristic estimate for budgeting, not an exact count.
 - Text logs and SQLite auditing have separate budgets. Logs contain bounded, redacted previews, not complete original requests. Treat logs, credential exports and backups as private data.
+
+## Deployment exposure and credential intake
+
+- The compose port mapping binds loopback by default (`CODEBUDDY2API_BIND` defaults to 127.0.0.1); a native run bound to a non-loopback host with an empty API key refuses to start unless `CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true` is set explicitly.
+- Credential imports/uploads persist the normalized form (token aliases folded into the canonical fields); strict JSON parsing rejects NaN/Infinity, and `expiresAt`/`lastRefreshTime` must be plausible finite millisecond timestamps.
 
 ## Billing data integrity
 
