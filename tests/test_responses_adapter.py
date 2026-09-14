@@ -613,6 +613,26 @@ def test_stream_events_carry_sequence_and_item_ids():
     print("✅ test_stream_events_carry_sequence_and_item_ids")
 
 
+def test_usage_maps_cached_tokens_and_omits_when_unknown():
+    """上游 cached_tokens/cache_read_input_tokens 透传；都没有时不出 input_tokens_details。"""
+    conv = ResponsesStreamConverter(model="m")
+    conv.feed_line('data: {"id":"u1","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"u1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":7}}}')
+    assert conv.get_nonstream_response()["usage"]["input_tokens_details"] == {"cached_tokens": 7}
+
+    conv = ResponsesStreamConverter(model="m")
+    conv.feed_line('data: {"id":"u2","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"u2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10,"cache_read_input_tokens":3}}')
+    assert conv.get_nonstream_response()["usage"]["input_tokens_details"] == {"cached_tokens": 3}
+
+    conv = ResponsesStreamConverter(model="m")
+    conv.feed_line('data: {"id":"u3","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"u3","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10}}')
+    assert "input_tokens_details" not in conv.get_nonstream_response()["usage"]
+
+    print("✅ test_usage_maps_cached_tokens_and_omits_when_unknown")
+
+
 if __name__ == "__main__":
     test_simple_text_request()
     test_array_input_request()
@@ -633,4 +653,5 @@ if __name__ == "__main__":
     test_nonstream_response()
     test_finish_reason_maps_to_terminal_status()
     test_stream_events_carry_sequence_and_item_ids()
-    print(f"\n🎉 All {19} tests passed!")
+    test_usage_maps_cached_tokens_and_omits_when_unknown()
+    print(f"\n🎉 All {20} tests passed!")

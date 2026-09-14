@@ -535,13 +535,17 @@ class ResponsesStreamConverter:
         if self._usage:
             u = self._usage
             reasoning_tokens = (u.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
+            # 缓存命中透传上游字段；两个键都缺失时省略 details，区分“未知”与“真正的 0”。
+            cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens",
+                                                                   u.get("cache_read_input_tokens"))
             usage = {
                 "input_tokens": u.get("prompt_tokens", u.get("input_tokens", 0)),
-                "input_tokens_details": {"cached_tokens": 0},
                 "output_tokens": u.get("completion_tokens", u.get("output_tokens", 0)),
                 "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
                 "total_tokens": u.get("total_tokens", 0),
             }
+            if isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0:
+                usage["input_tokens_details"] = {"cached_tokens": cached}
 
         obj = {
             "id": self.resp_id,
