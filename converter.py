@@ -972,7 +972,8 @@ class CredentialPool:
             # 的名义把模型级避让判成没有 —— 那会让下游拿到可重试的 503，而真实情况是这个
             # 名字发不出去。目录判不出来（尚未同步）时退回全部后端，保持旧口径。
             capable = {self._entry_endpoint(e) for e in candidates
-                       if _model_profiles(model, profile_region(self._entry_profile(e)))}
+                       if (profile := self._entry_profile(e))
+                       and profile in _model_profiles(model, profile_region(profile))}
         endpoints.discard(None)
         endpoints &= capable or endpoints
         if not endpoints:

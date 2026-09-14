@@ -219,6 +219,35 @@ class PoolRoutingTests(unittest.TestCase):
         (picked_cm, _), _headers = self.cred_for(model=OTHER_MODEL)
         self.assertIn(picked_cm, [cm for cm, _ in self.by_endpoint.values()])
 
+    def add_account(self, domain, uid):
+        path = self.root / (uid + ".info")
+        value = {"account": {"uid": uid, "enterpriseId": "synthetic-enterprise"},
+                 "auth": {"domain": domain, "accessToken": "synthetic-access",
+                          "refreshToken": "synthetic-refresh",
+                          "expiresAt": (time.time() + 86400) * 1000,
+                          "lastRefreshTime": time.time() * 1000}}
+        path.write_text(json.dumps(value), encoding="utf-8")
+        self.pool.reload([Path(e["id"]) for e in self.pool.entries()] + [path])
+        return next(e for e in self.pool.entries() if e["uid"] == uid)
+
+    def test_same_region_product_without_root_model_does_not_cancel_block(self):
+        self.add_account("www.workbuddy.cn", "synthetic-cn-work")
+        other = [{"id": OTHER_MODEL, "supportsToolCall": True}]
+        root = [{"id": MODEL, "supportsToolCall": True}]
+        converter.CONFIG["account_catalogs"] = {
+            e["account_key"]: {"profile": e["profile"], "models": other,
+                               "serves": root if e["profile"] == DOMESTIC_PROFILE else other}
+            for e in self.pool.entries()}
+        converter.invalidate_model_table()
+        self.assertEqual(converter._model_profiles(MODEL, "cn"), {DOMESTIC_PROFILE})
+        cm, _ = self.by_endpoint[DOMESTIC_ENDPOINT]
+        self.pool.note_status(cm, 404, model=MODEL, raw=_error_body(11102, "service info not found"))
+        with self.assertRaises(HTTPException) as caught:
+            self.cred_for()
+        self.assertEqual(caught.exception.status_code, 404)
+        self.assertEqual(caught.exception.detail["error"]["code"], "model_not_found")
+
+
     def test_region_scoped_fast_failure(self):
         """只在国际站内全部避让时才拒 intl 请求；cn 请求照旧通过。"""
         cm, _ = self.by_endpoint[INTL_ENDPOINT]
