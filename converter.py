@@ -65,6 +65,7 @@ from app.adapters.anthropic_adapter import (
 from app import auth_oauth
 from app import trial_rewards
 from app import model_policy
+from app.model_blocks import ModelBlocks
 from app.observability import (AuditMiddleware, observe_route, observe_usage,
                                observe_attempt, observe_failure)
 from app.credential_io import (CredentialFileError, read_import_file, atomic_write_credential,
@@ -338,6 +339,11 @@ STICKY_MAX = 512            # 黏绑表容量上限
 CRED_COOLDOWN = 300         # 凭证熔断冷却秒数
 MODEL_COOLDOWN = 600        # 模型级冷却兜底秒数（429 错误体无重置时间时）
 MODEL_COOLDOWN_MAX = 86400  # 模型级冷却上限秒数
+MODEL_SITE_BLOCK_S = 6 * 3600      # 官方判定「该后端无此模型」后的首次避让时长
+MODEL_SITE_BLOCK_MAX_S = 24 * 3600  # 反复命中的退避上限：最多一天放行重试一次
+# 后端确定性答复：这个站点根本没有这个模型（重试无意义，只能换后端）。
+MODEL_NOT_SERVABLE_CODES = frozenset({"11102"})
+_NOT_SERVABLE_MSG = re.compile(r"service info not found|model .{0,80}not (?:found|supported)", re.I)
 CRED_REFRESH_MARGIN = 600   # 主动刷新提前量秒数
 CRED_KEEPALIVE_S = 24 * 3600   # 每日保活：距上次刷新超过该值即主动刷新，防 refresh token 闲置过期
 CRED_KEEPALIVE_RETRY_S = 3600  # 保活刷新失败后的重试间隔（与临期刷新失败解耦）
@@ -395,6 +401,46 @@ def _parse_reset_time(raw: bytes) -> float | None:
 
 
 
+def _parse_not_servable(raw: bytes, status: int):
+    """识别 11102 之类的「该后端无此模型」答复，返回 (code, msg)；不是则 None。
+
+    只比对 code/msg 等独立字段：错误体里还带着 requestId，拿整段文本做子串匹配会把
+    "11102" 撞在 ID 上，误避让一个本来能用的模型。
+    """
+    if status not in (400, 404) or not raw:
+        return None
+    try:
+        payload = json.loads(raw.decode("utf-8", "replace"))
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    nodes = [payload]
+    inner = payload.get("error")
+    if isinstance(inner, dict):
+        nodes.append(inner)
+    code = msg = ""
+    for node in nodes:
+        for key in ("code", "errCode", "error_code"):
+            value = node.get(key)
+            if value is not None and str(value).strip():
+                code = code or str(value).strip()
+        for key in ("msg", "message"):
+            value = node.get(key)
+            if isinstance(value, str) and value.strip():
+                msg = msg or value.strip()
+    if not code and not msg:
+        return None
+    if code in MODEL_NOT_SERVABLE_CODES or _NOT_SERVABLE_MSG.search(msg):
+        return code or "11102", msg[:200]
+    return None
+
+
+def _block_model(model: str | None) -> str | None:
+    """避让表按客户端可见的模型名记账：default-model 只是 intl 侧对 auto 的别名。"""
+    return "auto" if model == "default-model" else model
+
+
 def _dynamic_request_headers(skey: str | None) -> dict:
     """每次请求生成与官方客户端同构的追踪/请求 ID 头；会话 ID 随 session_key 稳定。"""
     rid = secrets.token_hex(16)   # X-Request-ID == X-Conversation-Message-ID
@@ -423,11 +469,14 @@ def _dynamic_request_headers(skey: str | None) -> dict:
 class CredentialPool:
     """多凭证池：目录发现 + 热加载、黏性会话绑定、健康熔断、主动刷新。"""
 
-    def __init__(self, paths: list[Path] | None = None, scan: bool = False):
+    def __init__(self, paths: list[Path] | None = None, scan: bool = False,
+                 blocks_path: Path | None = None):
         self._lock = threading.RLock()
         self._entries: list[dict] = []   # {id, cm, fail_until}
         self._sticky: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
         self._model_fail: dict[tuple[str, str], float] = {}  # (cred_id, model) -> 冷却截止 epoch（429 模型级冷却）
+        # (后端, 模型) -> 避让截止：官方回 11102 说明该后端根本没这个模型，路由自动绕开
+        self._blocks = ModelBlocks(blocks_path, ttl_s=MODEL_SITE_BLOCK_S, max_ttl_s=MODEL_SITE_BLOCK_MAX_S)
         self._rr = {None: 0, "cn": 0, "intl": 0}
         self._ledger = None              # CreditLedger：pick 时按积分最早过期时间优先调度
         self._scan = scan                # True 时 pick 前自动扫描目录增删凭证
@@ -715,6 +764,21 @@ class CredentialPool:
             return _model_free(account.get("models"), model, profile)
         return _model_free(_models_for_profile(profile), model, profile)
 
+    @classmethod
+    def _entry_endpoint(cls, e: dict) -> str | None:
+        """该凭证实际打的后端入口：模型可用性按入口判定，同站点不同产品互不牵连。"""
+        profile = cls._entry_profile(e)
+        return PROFILE_ENDPOINTS.get(profile) if profile else None
+
+    def _model_servable(self, e: dict, model: str | None) -> bool:
+        """该后端未处于「无此模型」避让期；model 为空时不做后端级检查。"""
+        if not model:
+            return True
+        endpoint = self._entry_endpoint(e)
+        if not endpoint:
+            return True
+        return time.time() >= self._blocks.until(endpoint, _block_model(model))
+
     def _model_healthy(self, e: dict, model: str | None) -> bool:
         """该凭证对指定模型未处于 429 冷却期；model 为空时不做模型级检查。"""
         if not model:
@@ -734,7 +798,8 @@ class CredentialPool:
     def _candidates(self, model: str | None, *, region=None) -> list[dict]:
         """可用凭证按（零计费优先, 快过期积分优先）排序；同级由调用方轮询。"""
         healthy = [entry for entry in self._entries if self._healthy(entry)
-                   and self._eligible(entry, model, region=region) and self._model_healthy(entry, model)]
+                   and self._eligible(entry, model, region=region) and self._model_healthy(entry, model)
+                   and self._model_servable(entry, model)]
         if not healthy:
             return []
         # 目录倍率 x0.00 的同名模型排最前，其次快过期积分优先；无数据排最后。
@@ -821,11 +886,17 @@ class CredentialPool:
 
     def note_status(self, cm: CredentialManager | None, status: int,
                     model: str | None = None, raw: bytes = b"", *, generation=None):
-        """401/403 熔断整个凭证；429 只冷却 (凭证,模型) 至配额重置时间，其他模型/凭证不受影响。"""
+        """401/403 熔断整个凭证；429 只冷却 (凭证,模型) 至配额重置时间；11102 按 (后端,模型) 避让。
+
+        三者都是局部降级：其他模型、其他凭证、其他后端不受影响。"""
         if cm is None:
             return
         if status in (401, 403):
             self.cooldown(cm, reason=f"backend HTTP {status}", generation=generation)
+            return
+        not_servable = _parse_not_servable(raw, status) if model else None
+        if not_servable:
+            self.note_not_servable(cm, model, code=not_servable[0], msg=not_servable[1])
             return
         if status != 429 or not model:
             return
@@ -858,6 +929,53 @@ class CredentialPool:
             if any(now >= u for u in untils):
                 return None
             return min(untils)
+
+    def note_not_servable(self, cm, model: str, code: str = "", msg: str = "") -> float:
+        """记下「这个后端没有这个模型」，返回解除时间；路由会自动绕开该后端。"""
+        if not model:
+            return 0.0
+        entry = next((e for e in self._entries if e["cm"] is cm), None)
+        endpoint = self._entry_endpoint(entry) if entry else None
+        if not endpoint:
+            return 0.0
+        row = self._blocks.note(endpoint, _block_model(model), code=code, msg=msg)
+        until = float(row.get("until") or 0.0)
+        _log(f"[block] 模型 {model} @{endpoint} 官方回 {code}，"
+             f"{time.strftime('%m-%d %H:%M', time.localtime(until))} 前不再派发 "
+             f"(第 {row.get('hits')} 次){' | ' + msg[:80] if msg else ''}")
+        return until
+
+    def note_model_ok(self, cm, model: str) -> bool:
+        """该后端实测认这个模型了：立刻解除避让，不必等 TTL 半开。"""
+        if not model:
+            return False
+        entry = next((e for e in self._entries if e["cm"] is cm), None)
+        endpoint = self._entry_endpoint(entry) if entry else None
+        return bool(endpoint) and self._blocks.clear(endpoint, _block_model(model))
+
+    def model_block_until(self, model: str | None, *, region=None) -> float | None:
+        """该模型在所有可用后端上都处于避让期时返回最晚解除时间，否则 None。
+
+        只要还有一个后端没被避让就照常派发；全被避让时上层直接快速失败，不再白打上游。"""
+        if not model:
+            return None
+        now = time.time()
+        with self._lock:
+            endpoints = {self._entry_endpoint(e) for e in self._entries
+                         if self._healthy(e) and (region is None
+                                                  or _in_region(self._entry_profile(e), region))}
+        endpoints.discard(None)
+        if not endpoints:
+            return None
+        routed = _block_model(model)
+        untils = [self._blocks.until(endpoint, routed) for endpoint in endpoints]
+        if any(until <= now for until in untils):
+            return None
+        return max(untils)
+
+    def model_blocks_detail(self) -> list:
+        """避让表明细（看板/排障用）。"""
+        return self._blocks.detail()
 
     def refresh_due(self, margin_s: int = CRED_REFRESH_MARGIN, keepalive_s: int = CRED_KEEPALIVE_S):
         """按到期与保活条件刷新，失败退避只作用于发起操作时的凭据代次。"""
@@ -1306,6 +1424,15 @@ def _cred_for(payload: dict, model: str | None = None, *, region=None):
                 raise HTTPException(status_code=429, detail={"error": {
                     "message": f"模型 {model} 额度冷却中（全部凭证），预计 {t} 重置后恢复",
                     "type": "rate_limit_error"}})
+            blocked = pool.model_block_until(model, region=region)
+            if blocked:
+                # 后端已明确回过「无此模型」：给 404 让客户端换模型，别再拿空回复编故事
+                t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(blocked))
+                raise HTTPException(status_code=404, detail={"error": {
+                    "message": f"模型 {model} 在当前所有已登录后端均不可用（官方回 service info not found），"
+                               f"预计 {t} 后重试；请改用 /v1/models 列出的模型",
+                    "type": "invalid_request_error", "code": "model_not_found",
+                    "param": "model"}})
             raise HTTPException(status_code=503, headers={"Retry-After": "3" if _catalog_pending(region) else "30"},
                                 detail={"error": {"message": "无可用凭证（未登录、目录/额度未就绪或全部熔断）",
                                                   "type": "auth_error"}})
@@ -1340,8 +1467,18 @@ def _route_chat(payload, body, rid):
     return body, cred, headers, url
 
 
+def _note_cred_model_ok(cred, model: str | None) -> None:
+    """上游 200 即该后端认这个模型：解除 (后端, 模型) 避让。"""
+    pool = CONFIG.get("cred_pool")
+    if pool is not None and cred is not None and model:
+        cm = cred[0] if isinstance(cred, tuple) else cred
+        pool.note_model_ok(cm, model)
+
+
 def _note_cred_status(cred, status: int, model: str | None = None, raw: bytes = b""):
-    """后端 401/403 熔断该凭证；429 按 (凭证,模型) 冷却。黏性会话下次请求自动换绑。"""
+    """后端 401/403 熔断该凭证；429 按 (凭证,模型) 冷却；11102 按 (后端,模型) 避让。
+
+    黏性会话下次请求自动换绑/换后端。"""
     pool = CONFIG.get("cred_pool")
     if pool is not None and cred is not None:
         cm, generation = cred if isinstance(cred, tuple) else (cred, None)
@@ -1528,6 +1665,15 @@ def admin_credits(authorization: Optional[str] = Header(default=None),
     _check_admin_auth(authorization, x_api_key)
     ledger = CONFIG.get("ledger")
     return {"credits": ledger.snapshot() if ledger else {}}
+
+
+@app.get("/admin/model-blocks")
+def admin_model_blocks(authorization: Optional[str] = Header(default=None),
+                       x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
+    """(后端, 模型) 避让表：官方回过 service info not found 的组合，到期自动放行重试。"""
+    _check_admin_auth(authorization, x_api_key)
+    pool = CONFIG.get("cred_pool")
+    return {"model_blocks": pool.model_blocks_detail() if pool is not None else []}
 
 
 @app.post("/admin/checkin")
@@ -2280,6 +2426,8 @@ async def _fetch_checked_chat(url, headers, body, model_name, rid, cred=None, *,
         async with _backend_stream(url, headers, body, rid=rid, model_name=model_name) as response:
             if response.status_code != 200:
                 _check_upstream_status(response.status_code, await response.aread(), cred, body.get("model"))
+            else:
+                _note_cred_model_ok(cred, body.get("model"))
             try:
                 result = await _collect_stream(response, accumulator=accumulator)
             except UpstreamResponseError as error:
@@ -2335,6 +2483,8 @@ async def _chat_sse_lines(url, headers, body, model_name, t0, rid, cred=None, *,
     async with _backend_stream(url, headers, body, rid=rid, model_name=model_name) as response:
         if response.status_code != 200:
             _check_upstream_status(response.status_code, await response.aread(), cred, body.get("model"))
+        else:
+            _note_cred_model_ok(cred, body.get("model"))
         async for line in response.aiter_lines():
             tracker.feed_line(line)
             if tracker.done or tracker.finish_reason:
@@ -2746,7 +2896,8 @@ def main():
     files = [Path(p) for p in args.auth_file]
     if not files:
         seed_credentials()  # 自管模式：启动时把桌面端缺失凭据复制进 auth/
-    CONFIG["cred_pool"] = CredentialPool(files, scan=not files)
+    CONFIG["cred_pool"] = CredentialPool(files, scan=not files,
+                                         blocks_path=managed_auth_dir() / "model-site-blocks.json")
     CONFIG["cred"] = CONFIG["cred_pool"].first()
     CONFIG["account_catalogs"] = {}  # 在任何维护线程/预检启动前关闭静态兜底。
     if credits_mod is not None:
