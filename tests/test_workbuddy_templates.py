@@ -375,5 +375,19 @@ class WorkBuddyGitStatusTests(unittest.TestCase):
                         self.assertEqual(body, before)
 
 
+class WordBoundaryTests(unittest.TestCase):
+    """敏感词只在真实词边界命中：含关键词的标识符/路径不得被插入零宽空格。"""
+    def test_identifiers_and_paths_containing_terms_are_untouched(self):
+        for text in ("~/.agents/skills/x", "skillset", "mysandbox", "attacksurface",
+                     "data_exfiltration", "killall5", "weaponsmith"):  # 含 kill/sandbox/attack/weapon 等词项
+            with self.subTest(text=text):
+                self.assertEqual(desensitize_text(text), text)
+    def test_standalone_terms_still_split(self):
+        self.assertEqual(desensitize_text("kill the process"), "kill".replace("k", "k" + ZWSP, 1) + " the process")
+        self.assertNotEqual(desensitize_text("Sandbox mode"), "Sandbox mode")
+        self.assertNotEqual(desensitize_text("a kill-switch"), "a kill-switch")  # 连字符是边界
+        self.assertEqual(desensitize_text("skills."), "skills.")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

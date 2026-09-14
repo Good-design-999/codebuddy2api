@@ -106,9 +106,12 @@ SENSITIVE_TERMS: list[str] = [
 ]
 
 # 编译成一个大正则，按词长降序，避免短词先吃掉长词。
-# 用 \b 边界 + 忽略大小写。
+# 词边界用显式环视而不是 \b：词表含连字符/@等标点词，\b 语义不可靠；
+# 前后若是字母数字下划线则不匹配，skills 这类含关键词的标识符/路径不再被误改。
 _PATTERN = re.compile(
-    "|".join(re.escape(t) for t in sorted(SENSITIVE_TERMS, key=len, reverse=True)),
+    r"(?<![A-Za-z0-9_])(?:"
+    + "|".join(re.escape(t) for t in sorted(SENSITIVE_TERMS, key=len, reverse=True))
+    + r")(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
 
