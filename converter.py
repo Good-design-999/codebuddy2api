@@ -1373,7 +1373,9 @@ async def _protocol_http_exception(request: Request, exc: HTTPException):
     if path.startswith("/v1/messages"):
         # Anthropic：{"type": "error", "error": {...}}；上游业务 code 原样保留，客户端仍可识别 content_filter
         etype = _ANTHROPIC_ERROR_TYPES.get(str(err.get("type") or ""))
-        if etype is None:
+        if exc.status_code == 404:
+            etype = "not_found_error"  # Anthropic 约定：404 恒为 not_found_error
+        elif etype is None:
             etype = "api_error" if exc.status_code >= 500 else "invalid_request_error"
         error_obj = {**err, "type": etype, "message": message}  # code/param/image_count 等结构化字段原样保留
         return JSONResponse({"type": "error", "error": error_obj},

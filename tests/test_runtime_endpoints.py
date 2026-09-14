@@ -160,6 +160,17 @@ class EndpointTests(unittest.TestCase):
             body = response.json()
             self.assertEqual(body["type"], "error")
             self.assertEqual(body["error"]["type"], "authentication_error")
+            # Anthropic 约定 404 → not_found_error，即使内层写的是 invalid_request_error
+            converter.CONFIG["model_guard"] = True
+            try:
+                missing = self.client.post("/v1/messages", json={
+                    "model": "no-such-model", "max_tokens": 64,
+                    "messages": [{"role": "user", "content": "hi"}]},
+                    headers={"Authorization": "Bearer secret"})
+                self.assertEqual(missing.status_code, 404, missing.text)
+                self.assertEqual(missing.json()["error"]["type"], "not_found_error")
+            finally:
+                converter.CONFIG["model_guard"] = False
             response = self.client.get("/admin/credentials")
             self.assertEqual(response.status_code, 401, response.text)
             self.assertIn("detail", response.json())
