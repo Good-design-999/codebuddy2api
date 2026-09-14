@@ -405,6 +405,22 @@ def test_empty_messages():
     assert chat["messages"][0]["role"] == "system"
     print("✅ test_empty_messages")
 
+def test_disable_parallel_tool_use_is_mapped():
+    """tool_choice.disable_parallel_tool_use 必须端到端传到上游，不接受后丢失。"""
+    base = {"model": "auto", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "t", "input_schema": {"type": "object"}}]}
+    chat = anthropic_request_to_chat({**base, "tool_choice": {"type": "auto",
+                                      "disable_parallel_tool_use": True}})
+    assert chat["tool_choice"] == "auto"
+    assert chat["parallel_tool_calls"] is False
+    chat = anthropic_request_to_chat({**base, "tool_choice": {"type": "auto",
+                                      "disable_parallel_tool_use": False}})
+    assert chat["parallel_tool_calls"] is True
+    chat = anthropic_request_to_chat({**base, "tool_choice": {"type": "auto"}})
+    assert "parallel_tool_calls" not in chat
+    print("✅ test_disable_parallel_tool_use_is_mapped")
+
 
 if __name__ == "__main__":
     test_simple_text_request()
@@ -420,4 +436,5 @@ if __name__ == "__main__":
     test_nonstream_response()
     test_nonstream_response_tool_use()
     test_empty_messages()
-    print(f"\n🎉 All {13} tests passed!")
+    test_disable_parallel_tool_use_is_mapped()
+    print(f"\n🎉 All {14} tests passed!")

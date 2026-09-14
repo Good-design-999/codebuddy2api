@@ -663,6 +663,20 @@ def test_reasoning_effort_and_text_format_are_mapped():
 
     print("✅ test_reasoning_effort_and_text_format_are_mapped")
 
+def test_parallel_tool_calls_roundtrip():
+    """parallel_tool_calls 透传到上游请求，且响应对象如实回报请求值而非固定 True。"""
+    chat = responses_request_to_chat({"input": "hi", "parallel_tool_calls": False})
+    assert chat["parallel_tool_calls"] is False
+    conv = ResponsesStreamConverter(model="m", parallel_tool_calls=False)
+    conv.feed_line('data: {"id":"p1","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"p1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}')
+    assert conv.get_nonstream_response()["parallel_tool_calls"] is False
+    conv = ResponsesStreamConverter(model="m")
+    conv.feed_line('data: {"id":"p2","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"p2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}')
+    assert conv.get_nonstream_response()["parallel_tool_calls"] is True
+    print("✅ test_parallel_tool_calls_roundtrip")
+
 
 if __name__ == "__main__":
     test_simple_text_request()
@@ -686,4 +700,5 @@ if __name__ == "__main__":
     test_stream_events_carry_sequence_and_item_ids()
     test_usage_maps_cached_tokens_and_omits_when_unknown()
     test_reasoning_effort_and_text_format_are_mapped()
-    print(f"\n🎉 All {21} tests passed!")
+    test_parallel_tool_calls_roundtrip()
+    print(f"\n🎉 All {22} tests passed!")

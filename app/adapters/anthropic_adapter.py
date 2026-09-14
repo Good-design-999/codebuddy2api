@@ -90,9 +90,11 @@ def anthropic_request_to_chat(body: dict) -> dict:
                 chat["tool_choice"] = "required" if kind == "any" else kind
             else:
                 raise ValueError("unsupported tool_choice type")
+            # 禁止并行工具调用的约束必须传到上游，不接受后静默丢失
+            if isinstance(tc.get("disable_parallel_tool_use"), bool):
+                chat["parallel_tool_calls"] = not tc["disable_parallel_tool_use"]
         elif isinstance(tc, str):
             chat["tool_choice"] = tc if tc in ("none", "auto", "required") else {"type": "function", "function": {"name": tc}}
-
     # 透传常见参数
     for key in ("temperature", "top_p", "stop", "top_k"):
         if key in body:

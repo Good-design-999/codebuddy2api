@@ -91,7 +91,7 @@ def responses_request_to_chat(body: dict) -> dict:
     # 透传常见参数
     for key in ("temperature", "top_p", "stop", "seed",
                 "presence_penalty", "frequency_penalty",
-                "response_format", "reasoning_effort"):
+                "response_format", "reasoning_effort", "parallel_tool_calls"):
         if key in body:
             chat[key] = body[key]
 
@@ -306,10 +306,11 @@ class ResponsesStreamConverter:
       yield converter.finish().encode()
     """
 
-    def __init__(self, model: str = "unknown"):
+    def __init__(self, model: str = "unknown", parallel_tool_calls: bool = True):
         self.resp_id = _rand_id("resp_")
         self.msg_id = _rand_id("msg_")
         self.model = model
+        self._parallel_tool_calls = bool(parallel_tool_calls)
         self.created_at = int(time.time())
 
         # 状态标记
@@ -589,7 +590,7 @@ class ResponsesStreamConverter:
             "status": status,
             "model": self.model,
             "output": output,
-            "parallel_tool_calls": True,
+            "parallel_tool_calls": self._parallel_tool_calls,
             "usage": usage,
         }
         if status == "incomplete":

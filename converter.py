@@ -1300,7 +1300,7 @@ PASSTHROUGH_BODY_KEYS = {
     "max_tokens", "max_completion_tokens", "top_p", "stream",
     "stream_options", "stop", "presence_penalty", "frequency_penalty",
     "n", "response_format", "seed", "user", "reasoning_effort", "prompt_cache_key",
-    "verbosity", "reasoning_summary",
+    "verbosity", "reasoning_summary", "parallel_tool_calls",
 }
 
 # ---------------------------------------------------------------------------
@@ -2608,7 +2608,7 @@ async def create_response(request: Request,
 
 
 async def _nonstream_adapted(url, headers, body, model_name, t0, rid, cred, *, anthropic=False):
-    converter = AnthropicStreamConverter(model=model_name) if anthropic else ResponsesStreamConverter(model=model_name)
+    converter = (AnthropicStreamConverter(model=model_name) if anthropic else ResponsesStreamConverter(model=model_name, parallel_tool_calls=body.get("parallel_tool_calls", True)))
     try:
         collected = await _fetch_checked_chat(url, headers, body, model_name, rid, cred, filter_retry=True)
         for line in _chat_result_to_sse_lines(_completion_to_merged(collected)):
@@ -2624,7 +2624,7 @@ async def _nonstream_adapted(url, headers, body, model_name, t0, rid, cred, *, a
 
 async def _stream_adapted(url, headers, body, model_name, t0, rid, cred=None, *, anthropic=False):
     """协议适配只处理事件映射，连接、聚合与错误边界共用。"""
-    converter = AnthropicStreamConverter(model=model_name) if anthropic else ResponsesStreamConverter(model=model_name)
+    converter = (AnthropicStreamConverter(model=model_name) if anthropic else ResponsesStreamConverter(model=model_name, parallel_tool_calls=body.get("parallel_tool_calls", True)))
     try:
         async for line in _chat_sse_lines(
                 url, headers, body, model_name, t0, rid, cred,
