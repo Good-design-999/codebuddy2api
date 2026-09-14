@@ -1396,6 +1396,7 @@ CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "model_guard": True,     # 表外模型本地拦截，不转发上游
                 "max_images": 16, "image_policy": "truncate",
                 "max_request_bytes": 32 * 1024 * 1024, "log_body_limit": 65536,
+                "max_inbound_bytes": 64 * 1024 * 1024,
                 "usage_daily": None,     # 官方用量聚合视图（日期×模型 credit），供 billing/usage 出 daily_costs
                 "usage_daily_accounts": None,  # 按账号的用量快照；单账号失败不丢历史
                 "credit_price_cny": None, "credit_price_usd": None, "usd_rate": None,
@@ -3041,6 +3042,9 @@ def main():
     ap.add_argument("--max-request-bytes", type=_positive_int, metavar="BYTES",
                     default=os.environ.get("CODEBUDDY2API_MAX_REQUEST_BYTES", str(32 * 1024 * 1024)),
                     help="图片处理与适配后请求体的字节上限，默认 32 MiB")
+    ap.add_argument("--max-inbound-bytes", type=_positive_int, metavar="BYTES",
+                    default=os.environ.get("CODEBUDDY2API_MAX_INBOUND_BYTES", str(64 * 1024 * 1024)),
+                    help="入站原始请求体字节上限（解析前生效，含 chunked），默认 64 MiB")
     ap.add_argument("--log-body-limit", type=_nonnegative_int, metavar="BYTES",
                     default=os.environ.get("CODEBUDDY2API_LOG_BODY_LIMIT", "65536"),
                     help="每条正文日志的预览字节上限，默认 64 KiB；0 只记录摘要")
@@ -3063,7 +3067,7 @@ def main():
                  "请设置 CODEBUDDY2API_KEY，或确知风险后以 CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true 显式放行")
 
     for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit", "auto_trial",
-                "tool_call_max_retry"):
+                "tool_call_max_retry", "max_inbound_bytes"):
         CONFIG[key] = getattr(args, key)
     CONFIG["api_key"] = args.api_key
     CONFIG["desensitize"] = args.desensitize

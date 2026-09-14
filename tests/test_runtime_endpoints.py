@@ -570,6 +570,61 @@ class TransportBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 1)
 
 
+class InboundBodyLimitTests(unittest.TestCase):
+    """入站原始字节限量：解析前 413，chunked 同样受限，/admin 不受影响。"""
+
+    def _app(self, limit):
+        from app.inbound_limits import InboundBodyLimitMiddleware
+        from fastapi import Request
+        app = FastAPI()
+
+        @app.post("/v1/chat/completions")
+        async def inference(request: Request):
+            return {"size": len(await request.body())}
+
+        @app.post("/admin/x")
+        async def admin(request: Request):
+            return {"size": len(await request.body())}
+
+        app.add_middleware(InboundBodyLimitMiddleware, config={"max_inbound_bytes": limit})
+        return TestClient(app)
+
+    def test_over_limit_rejected_before_parsing_and_under_limit_passes(self):
+        client = self._app(1024)
+        ok = client.post("/v1/chat/completions", json={"messages": []})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        big = client.post("/v1/chat/completions", content=b"x" * 2048,
+                          headers={"Content-Type": "application/json"})
+        self.assertEqual(big.status_code, 413)
+        self.assertEqual(big.json()["error"]["code"], "request_too_large")
+        self.assertNotIn("detail", big.json())
+        big_admin = client.post("/admin/x", content=b"x" * 2048)
+        self.assertEqual(big_admin.status_code, 200)  # 管理路由不在此限量范围
+
+    def test_chunked_body_is_counted_and_rejected(self):
+        from app.inbound_limits import InboundBodyLimitMiddleware
+        reached = []
+
+        async def app(scope, receive, send):
+            reached.append(True)
+
+        middleware = InboundBodyLimitMiddleware(app, {"max_inbound_bytes": 10})
+        chunks = [{"type": "http.request", "body": b"12345678", "more_body": True},
+                  {"type": "http.request", "body": b"9" * 8, "more_body": False}]
+        sent = []
+
+        async def receive():
+            return chunks.pop(0) if chunks else {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+
+        import asyncio
+        asyncio.run(middleware({"type": "http", "path": "/v1/chat/completions"}, receive, send))
+        self.assertFalse(reached)  # 超限请求不进入下游
+        self.assertEqual(sent[0]["status"], 413)
+
+
 class ConfigurationTests(unittest.TestCase):
     def configure(self, env=None, flags=(), invalid=False):
         with contextlib.ExitStack() as stack:

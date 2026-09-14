@@ -91,6 +91,8 @@ def install(gateway):
     install_admin(app, config, config["management"])
     app.add_middleware(AuditMiddleware, config=config)
     app.add_middleware(PolicyScopeMiddleware)
+    from .inbound_limits import InboundBodyLimitMiddleware
+    app.add_middleware(InboundBodyLimitMiddleware, config=config)  # 最外层：解析前限原始字节
     install_pages(app, Path(gateway.__file__).resolve().parent / "web" / "dist")
 
 
