@@ -2324,9 +2324,13 @@ def _chat_result_to_sse_lines(m: dict) -> list[str]:
     tcs = m.get("tool_calls") or []
     finish = m.get("finish_reason") or "stop"
     model = m.get("model")
+    # 一次响应的所有 chunk 共享稳定的 completion 标识，严格客户端可按契约关联事件
+    completion_id = "chatcmpl-" + os.urandom(12).hex()
+    created = int(time.time())
 
     def _line(delta: dict, fr=None) -> str:
-        payload = {"choices": [{"index": 0, "delta": delta, "finish_reason": fr}]}
+        payload = {"id": completion_id, "object": "chat.completion.chunk", "created": created,
+                   "choices": [{"index": 0, "delta": delta, "finish_reason": fr}]}
         if model:
             payload["model"] = model
         return "data: " + json.dumps(payload, ensure_ascii=False)
@@ -2343,7 +2347,11 @@ def _chat_result_to_sse_lines(m: dict) -> list[str]:
         lines.append(_line({"tool_calls": [dict(tc, index=i)]}))
     lines.append(_line({}, finish))
     if m.get("usage"):
-        lines.append("data: " + json.dumps({"choices": [], "usage": m["usage"]}, ensure_ascii=False))
+        usage_chunk = {"id": completion_id, "object": "chat.completion.chunk", "created": created,
+                       "choices": [], "usage": m["usage"]}
+        if model:
+            usage_chunk["model"] = model
+        lines.append("data: " + json.dumps(usage_chunk, ensure_ascii=False))
     lines.append("data: [DONE]")
     return lines
 

@@ -83,6 +83,22 @@ class TestChatAggregation(unittest.TestCase):
         self.assertLess(first_reasoning, first_content)
 
 
+class TestReplayEnvelope(unittest.TestCase):
+    """聚合重放的 chunk 必须带完整 chat.completion.chunk 信封（id/object/created），usage chunk 同样。"""
+    def test_replayed_chunks_share_stable_envelope(self):
+        merged = _merge_chat_sse_text(_SSE)
+        lines = _chat_result_to_sse_lines(merged)
+        chunks = [json.loads(l[6:]) for l in lines if l.startswith("data: ") and l != "data: [DONE]"]
+        self.assertTrue(chunks)
+        ids = {c["id"] for c in chunks}
+        self.assertEqual(len(ids), 1) and next(iter(ids)).startswith("chatcmpl-")
+        for c in chunks:
+            self.assertEqual(c["object"], "chat.completion.chunk")
+            self.assertIsInstance(c["created"], int)
+        self.assertEqual(chunks[-1]["choices"], [])
+        self.assertIn("usage", chunks[-1])
+
+
 class TestAnthropicThinking(unittest.TestCase):
     """reasoning_content 必须映射为 Anthropic thinking content block。"""
 
