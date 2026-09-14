@@ -3,7 +3,8 @@
 Methods are synchronous: ASGI callers must offload them. Lock and SQLite busy
 waits are capped at 250ms; SQL has a cooperative 1s progress deadline (not a hard
 wall-clock guarantee for filesystem I/O). Failures are observable, not retried.
-Ingest deduplication and aggregates intentionally outlive all detail eviction.
+Aggregates intentionally outlive all detail eviction. Ingest dedup rows expire with the
+same retention cutoff as their details, so the dedup table cannot grow without bound.
 Detail accounting is transactional; indexed cleanup commits bounded batches.
 Large budget/retention reductions converge on subsequent writes or detail reads
 (including storage()), reported as pending_cleanup until complete. This is a
@@ -23,7 +24,7 @@ import time
 import uuid
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _CLEANUP_BATCH = 128
 _CLEANUP_SECONDS = 0.05
 METRICS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
@@ -125,11 +126,11 @@ class AuditStore:
             self._db.execute("BEGIN IMMEDIATE")
             version = self._db.execute("PRAGMA user_version").fetchone()[0]
             tables = self._db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-            if version not in (0, SCHEMA_VERSION) or (version == 0 and tables):
+            if version not in (0, 1, SCHEMA_VERSION) or (version == 0 and tables):
                 raise ValueError("unsupported audit schema")
             self._db.execute("CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL, detail_generation INTEGER NOT NULL, cleared_at REAL NOT NULL)")
             self._db.execute("INSERT OR IGNORE INTO state VALUES(1,0,0,0)")
-            self._db.execute("CREATE TABLE IF NOT EXISTS ingest (id TEXT PRIMARY KEY, kind TEXT NOT NULL)")
+            self._db.execute("CREATE TABLE IF NOT EXISTS ingest (id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_at REAL NOT NULL)")
             self._db.execute("CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, started_at REAL NOT NULL, model TEXT, profile TEXT, credential TEXT, outcome TEXT, status_code INTEGER, payload TEXT NOT NULL, logical_bytes INTEGER NOT NULL)")
             self._db.execute("CREATE INDEX IF NOT EXISTS requests_time ON requests(started_at,id)")
             self._db.execute("CREATE TABLE IF NOT EXISTS attempts (request_id TEXT NOT NULL, ordinal INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(request_id,ordinal))")
@@ -138,12 +139,24 @@ class AuditStore:
             self._init_accounting()
             for table in ("stats_hourly", "stats_daily", "stats_totals"):
                 self._db.execute(f"CREATE TABLE IF NOT EXISTS {table} (bucket INTEGER NOT NULL, dimension TEXT NOT NULL, dimension_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(bucket,dimension,dimension_key))")
+            self._migrate_ingest_time()
             self._db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self._epoch = self._db.execute("SELECT epoch FROM state").fetchone()[0]
             self._db.execute("COMMIT")
         except Exception:
             self._db.close()
             raise
+
+    def _migrate_ingest_time(self):
+        # v1 → v2：去重表获得时间维度。旧行用对应明细的时间回填，没有明细的按现在计，
+        # 随后与明细同截止期过期，不再无限期滞留。
+        columns = [row[1] for row in self._db.execute("PRAGMA table_info(ingest)").fetchall()]
+        if "created_at" not in columns:
+            self._db.execute("ALTER TABLE ingest ADD COLUMN created_at REAL")
+            self._db.execute("""UPDATE ingest SET created_at=COALESCE(
+                (SELECT started_at FROM requests WHERE requests.id=ingest.id),
+                (SELECT started_at FROM events WHERE events.id=ingest.id), ?)""", (time.time(),))
+        self._db.execute("CREATE INDEX IF NOT EXISTS ingest_time ON ingest(created_at)")
 
     def _init_accounting(self):
         # Additive v1 migration: scan legacy details only once, under the same
@@ -298,7 +311,7 @@ class AuditStore:
             state = self._db.execute("SELECT * FROM state").fetchone()
             if data["epoch"] != state["epoch"]:
                 return {"ok": True, "recorded": False, "reason": "stale_epoch"}
-            if not self._db.execute("INSERT OR IGNORE INTO ingest VALUES(?, 'request')", (data["id"],)).rowcount:
+            if not self._db.execute("INSERT OR IGNORE INTO ingest VALUES(?, 'request', ?)", (data["id"], data["started_at"])).rowcount:
                 return {"ok": True, "recorded": False, "reason": "duplicate"}
             self._aggregate(data)
             generation = record.get("detail_generation")
@@ -338,12 +351,20 @@ class AuditStore:
             if time.monotonic() >= deadline:
                 break
             self._db.execute(f"DELETE FROM {table} WHERE id=?", (record_id,))
+        # 去重行与明细同截止期过期：保留期之外不再防重放，也不再无限增长
+        for row in self._db.execute("SELECT id FROM ingest WHERE created_at<? ORDER BY created_at LIMIT ?",
+                                    (cutoff, _CLEANUP_BATCH)):
+            if time.monotonic() >= deadline:
+                break
+            self._db.execute("DELETE FROM ingest WHERE id=?", (row[0],))
 
     def _cleanup_pending(self, budget=None, retention_days=None):
         budget = self.max_bytes if budget is None else budget
         cutoff = time.time() - (self.retention_days if retention_days is None else retention_days) * 86400
         accounting = self._db.execute("SELECT logical_bytes,cleanup_target FROM detail_accounting WHERE id=1").fetchone()
-        return (accounting[0] > budget or accounting[1] is not None or any(
+        ingest_expired = self._db.execute(
+            "SELECT 1 FROM ingest WHERE created_at<? LIMIT 1", (cutoff,)).fetchone()
+        return (accounting[0] > budget or accounting[1] is not None or ingest_expired or any(
             self._db.execute(f"SELECT 1 FROM {table} WHERE started_at<? LIMIT 1", (cutoff,)).fetchone()
             for table in ("requests", "events")))
 
@@ -382,7 +403,7 @@ class AuditStore:
             if source.get("epoch", state["epoch"]) != state["epoch"]:
                 return {"ok": True, "recorded": False, "reason": "stale_epoch"}
             event_id = safe_label(source.get("event_id", source.get("id"))) or uuid.uuid4().hex
-            if not self._db.execute("INSERT OR IGNORE INTO ingest VALUES(?,?)", (event_id, kind)).rowcount:
+            if not self._db.execute("INSERT OR IGNORE INTO ingest VALUES(?,?,?)", (event_id, kind, started_at)).rowcount:
                 return {"ok": True, "recorded": False, "reason": "duplicate"}
             if (started_at <= state["cleared_at"] or
                     source.get("detail_generation", state["detail_generation"]) != state["detail_generation"]):

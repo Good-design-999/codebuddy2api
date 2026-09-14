@@ -502,6 +502,163 @@ def test_aggregate_credits():
     print("✅ test_aggregate_credits")
 
 
+def _fake_client(pages, seen=None):
+    """按 pageNum 返回预置响应的 httpx.Client 替身。"""
+    class FakeResp:
+        status_code = 200
+        def __init__(self, payload):
+            self._p = payload
+        def json(self):
+            return self._p
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def post(self, url, headers=None, json=None, timeout=None):
+            if seen is not None:
+                seen.append(json.get("pageNum", json.get("PageNumber")))
+            return FakeResp(pages[min((json.get("pageNum") or json.get("PageNumber")) - 1, len(pages) - 1)])
+    return FakeClient
+
+
+def _with_client(fake, fn):
+    orig = credits.httpx.Client
+    credits.httpx.Client = fake
+    try:
+        return fn()
+    finally:
+        credits.httpx.Client = orig
+
+
+def test_fetch_request_usage_rejects_invalid_success_payloads():
+    """HTTP 200 但业务码失败或结构缺失：必须报错，不能当作零用量。"""
+    token = _jwt("https://www.codebuddy.cn/x")
+    for pages in ([{"code": 1059, "msg": "rate limited", "data": {"total": 0, "data": []}}],
+                  [{"code": 0, "data": {}}],                      # 缺 data.data/total
+                  [{"data": {"data": [], "total": 0}}],           # code 缺失但结构完整 → 合法空
+                  ):
+        try:
+            result = _with_client(_fake_client(pages),
+                                  lambda: credits.fetch_request_usage(token))
+        except RuntimeError:
+            assert pages[0].get("code") not in (0, None) or "data" not in pages[0].get("data", {}) \
+                or "data" not in pages[0]["data"]
+        else:
+            assert pages[0].get("code") is None and result["requests"] == 0  # 合法空结果照旧可用
+    print("✅ test_fetch_request_usage_rejects_invalid_success_payloads")
+
+
+def test_fetch_credits_distinguishes_empty_from_missing_structure():
+    """Accounts 键存在但为空 = 合法零余额；结构整体缺失 = 报错，不得覆盖缓存为零。"""
+    token = _jwt("https://www.codebuddy.cn/x")
+    empty = _with_client(_fake_client([{"code": 0, "data": {"Response": {"Data": {"Accounts": []}}}}]),
+                         lambda: credits.fetch_credits(token))
+    assert empty["credits"] == 0.0 and empty["count"] == 0
+    for bad in ({"code": 0, "data": {}}, {"code": 0, "data": {"Response": {"Data": {}}}}):
+        try:
+            _with_client(_fake_client([bad]), lambda: credits.fetch_credits(token))
+            raise AssertionError("missing Accounts structure must raise")
+        except RuntimeError as error:
+            assert "Accounts" in str(error)
+    print("✅ test_fetch_credits_distinguishes_empty_from_missing_structure")
+
+
+def test_fetch_credits_paginates_until_short_page():
+    """积分包超过一页时翻页累加；不足一页停止；达到页数上限标记 partial。"""
+    token = _jwt("https://www.codebuddy.cn/x")
+    account = lambda i: {"PackageName": f"p{i}", "PackageCode": f"c{i}",
+                         "SlicePeriodUsageDetails": [{"SlicePeriodCapacityRemainPrecise": "1",
+                                                      "DeductionEndTime": None}]}
+    full_page = {"code": 0, "data": {"Response": {"Data": {"Accounts": [account(i) for i in range(100)]}}}}
+    short_page = {"code": 0, "data": {"Response": {"Data": {"Accounts": [account(1000)]}}}}
+    seen = []
+    result = _with_client(_fake_client([full_page, short_page], seen), lambda: credits.fetch_credits(token))
+    assert seen == [1, 2] and result["count"] == 101 and result["credits"] == 101.0
+    assert result["partial"] is False
+
+    seen = []
+    result = _with_client(_fake_client([full_page] * credits.CREDITS_MAX_PAGES, seen),
+                          lambda: credits.fetch_credits(token))
+    assert len(seen) == credits.CREDITS_MAX_PAGES
+    assert result["partial"] is True
+    print("✅ test_fetch_credits_paginates_until_short_page")
+
+
+def test_fetch_request_usage_marks_partial_at_page_cap():
+    """用量明细达到页数上限且 total 更大时必须标记 partial。"""
+    token = _jwt("https://www.codebuddy.cn/x")
+    big_total = credits.USAGE_MAX_PAGES * credits.USAGE_PAGE_SIZE + 1
+    row = {"requestTime": "2026-09-01 10:00:00", "model": "m", "credit": 0.01}
+    page = {"code": 0, "data": {"total": big_total, "data": [row]}}
+    result = _with_client(_fake_client([page]), lambda: credits.fetch_request_usage(token))
+    assert result["partial"] is True and result["requests"] == credits.USAGE_MAX_PAGES
+    print("✅ test_fetch_request_usage_marks_partial_at_page_cap")
+
+
+def test_sync_usage_keeps_per_account_snapshots_on_failure():
+    """单账号同步失败：聚合保留其上次成功快照并标记 stale/partial，不再整体覆盖丢失。"""
+    import converter
+    with tempfile.TemporaryDirectory() as td:
+        paths = []
+        for uid in ("u1", "u2"):
+            p = Path(td) / f"{uid}.info"
+            p.write_text(json.dumps({
+                "auth": {"accessToken": f"token-{uid}", "refreshToken": "r",
+                         "domain": "https://www.codebuddy.cn",
+                         "expiresAt": int(time.time() * 1000) + 86400000,
+                         "lastRefreshTime": time.time() * 1000},
+                "account": {"uid": uid, "enterpriseId": "e"}}), encoding="utf-8")
+            paths.append(p)
+        pool = converter.CredentialPool(paths)
+        snapshots = {
+            "token-u1": {"by_day": {"2026-09-01": {"m": 10.0}}, "total_credits": 10.0, "requests": 1, "partial": False},
+            "token-u2": {"by_day": {"2026-09-02": {"m": 20.0}}, "total_credits": 20.0, "requests": 2, "partial": False},
+        }
+        failing = set()
+
+        def fake_fetch(token, uid="", domain=""):
+            if token in failing:
+                raise RuntimeError("synthetic sync failure")
+            return snapshots[token]
+
+        saved = (converter.CONFIG.get("usage_daily"), converter.CONFIG.get("usage_daily_accounts"),
+                 converter.CONFIG.get("control_store"))
+        orig_fetch = credits.fetch_request_usage
+        credits.fetch_request_usage = fake_fetch
+        converter.CONFIG.update(usage_daily=None, usage_daily_accounts=None, control_store=None)
+        try:
+            converter._sync_usage(pool)
+            view = converter.CONFIG["usage_daily"]
+            assert view["total_credits"] == 30.0 and view["requests"] == 3
+            assert view["partial"] is False and "stale_accounts" not in view
+
+            failing.add("token-u2")
+            converter._sync_usage(pool)
+            view = converter.CONFIG["usage_daily"]
+            assert view["total_credits"] == 30.0 and view["requests"] == 3  # u2 历史保留
+            assert view["partial"] is True and view["stale_accounts"] == ["u2.info"]
+
+            failing.clear()
+            snapshots["token-u2"] = {"by_day": {"2026-09-02": {"m": 25.0}},
+                                     "total_credits": 25.0, "requests": 4, "partial": False}
+            converter._sync_usage(pool)
+            view = converter.CONFIG["usage_daily"]
+            assert view["total_credits"] == 35.0 and view["partial"] is False  # 成功后自愈
+
+            paths[1].unlink()
+            pool.prune()
+            converter._sync_usage(pool)
+            view = converter.CONFIG["usage_daily"]
+            assert view["total_credits"] == 10.0  # 凭证删除后其快照不再计入
+        finally:
+            credits.fetch_request_usage = orig_fetch
+            converter.CONFIG["usage_daily"], converter.CONFIG["usage_daily_accounts"], \
+                converter.CONFIG["control_store"] = saved
+    print("✅ test_sync_usage_keeps_per_account_snapshots_on_failure")
+
+
 def test_fetch_request_usage_paging():
     """mock 分页明细：跨页聚合 credit，按 日期×模型 归并；请求天数夹到 30 天。"""
     pages = [
@@ -537,7 +694,7 @@ def test_fetch_request_usage_paging():
     finally:
         credits.httpx.Client = orig
     assert seen["pages"] == [1, 2], seen       # 按 total 停止分页
-    assert u["requests"] == 3 and abs(u["total_credits"] - 0.75) < 1e-9
+    assert u["requests"] == 3 and abs(u["total_credits"] - 0.75) < 1e-9 and u["partial"] is False
     assert u["by_day"]["2026-09-01"]["glm-5.3"] == 0.75
     assert "hy4-preview" in u["by_day"]["2026-09-02"]  # 免费模型 0 credit 也计入请求数
     import time as _t
@@ -583,6 +740,10 @@ def test_billing_balance_identity():
             # 区间过滤只统计窗口内明细
             converter.CONFIG["usage_daily"] = {"by_day": {"2026-09-01": {"glm-5.3": 200.0},
                                                           "2026-09-05": {"glm-5.3": 50.0}},
+                                               "groups": {"domestic": {"by_day": {
+                                                   "2026-09-01": {"glm-5.3": 200.0},
+                                                   "2026-09-05": {"glm-5.3": 50.0}},
+                                                   "total_credits": 250.0, "requests": 3}},
                                                "total_credits": 250.0, "requests": 3,
                                                "fetched_at": time.time()}
             filtered = converter.billing_usage("2026-09-04", "2026-09-30", None, None)
@@ -592,6 +753,42 @@ def test_billing_balance_identity():
             converter.CONFIG["ledger"] = saved_led
             converter.CONFIG["usage_daily"] = saved_usage
     print("✅ test_billing_balance_identity")
+
+
+def test_billing_usage_prices_each_day_by_site():
+    """两站单价不同且用量发生在不同天：逐日金额必须按本站单价，而不是全局平均价。"""
+    import converter
+    with tempfile.TemporaryDirectory() as td:
+        led = credits.CreditLedger(Path(td) / "ledger.json")
+        led.update_credits("cn", {"credits": 100.0, "segments": [
+            {"remaining": 100.0, "total": 200.0, "expires_at": None}], "intl": False})
+        led.update_credits("ai", {"credits": 100.0, "segments": [
+            {"remaining": 100.0, "total": 200.0, "expires_at": None}], "intl": True})
+        saved = (converter.CONFIG.get("ledger"), converter.CONFIG.get("usage_daily"))
+        try:
+            converter.CONFIG["ledger"] = led
+            # 国内 100 credits @ $0.014/7.15 在 09-01；国际 100 credits @ $0.03 在 09-02
+            converter.CONFIG["usage_daily"] = {
+                "by_day": {"2026-09-01": {"m": 100.0}, "2026-09-02": {"m": 100.0}},
+                "groups": {"domestic": {"by_day": {"2026-09-01": {"m": 100.0}},
+                                        "total_credits": 100.0, "requests": 1},
+                           "international": {"by_day": {"2026-09-02": {"m": 100.0}},
+                                             "total_credits": 100.0, "requests": 1}},
+                "total_credits": 200.0, "requests": 2, "fetched_at": time.time()}
+            usage = converter.billing_usage(None, None, None, None)
+            days = {d["timestamp"]: d["line_items"] for d in usage["daily_costs"]}
+            import time as _t
+            d1 = _t.mktime(_t.strptime("2026-09-01", "%Y-%m-%d"))
+            d2 = _t.mktime(_t.strptime("2026-09-02", "%Y-%m-%d"))
+            cn_cents = 100 * 0.014 / 7.15 * 100   # ≈ 19.58 美分
+            assert abs(days[d1][0]["cost"] - cn_cents) < 0.01, days[d1]
+            assert abs(days[d2][0]["cost"] - 300.0) < 0.01, days[d2]  # 100 × $0.03 = 300 美分
+            # 恒等式：Σdaily ≈ total_usage（全量口径取 used_usd）
+            assert abs(sum(i["cost"] for d in usage["daily_costs"] for i in d["line_items"])
+                       - usage["total_usage"]) < 0.02
+        finally:
+            converter.CONFIG["ledger"], converter.CONFIG["usage_daily"] = saved
+    print("✅ test_billing_usage_prices_each_day_by_site")
 
 
 def test_billing_intl_split():
@@ -728,8 +925,14 @@ if __name__ == "__main__":
     test_current_models_merge()
     test_credits_to_usd()
     test_aggregate_credits()
+    test_fetch_request_usage_rejects_invalid_success_payloads()
+    test_fetch_credits_distinguishes_empty_from_missing_structure()
+    test_sync_usage_keeps_per_account_snapshots_on_failure()
+    test_fetch_credits_paginates_until_short_page()
+    test_fetch_request_usage_marks_partial_at_page_cap()
     test_fetch_request_usage_paging()
     test_billing_balance_identity()
+    test_billing_usage_prices_each_day_by_site()
     test_billing_intl_split()
     test_current_models_intl_condition()
     test_guard_model()

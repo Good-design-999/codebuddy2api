@@ -1198,9 +1198,11 @@ def _sync_model_catalogs(pool, ledger, refs, failed):
 
 
 def _sync_usage(pool):
-    """历史用量仅在定时/手动维护时同步，入库唤醒不额外拉取历史。"""
-    by_day, groups = {}, {}
-    used, count, any_success = 0.0, 0, False
+    """历史用量仅在定时/手动维护时同步；每账号独立快照，单账号失败只替换自身数据。"""
+    accounts = CONFIG.get("usage_daily_accounts")
+    if not isinstance(accounts, dict):
+        accounts = CONFIG["usage_daily_accounts"] = {}
+    stale = set()
     for entry in pool.entries():
         if not model_policy.credential_enabled(CONFIG, entry):
             continue
@@ -1212,29 +1214,66 @@ def _sync_usage(pool):
             site = site_for_headers(headers)
             usage = credits_mod.fetch_request_usage(_bearer_token(headers), uid=headers.get("X-User-Id", ""),
                                                     domain=headers.get("X-Domain", ""))
-            def merge():
-                nonlocal used, count, any_success
-                any_success = True
-                group = groups.setdefault(site, {"by_day": {}, "total_credits": 0.0, "requests": 0})
-                for day, models in usage["by_day"].items():
-                    total_day = by_day.setdefault(day, {})
-                    site_day = group["by_day"].setdefault(day, {})
-                    for model, credit in models.items():
-                        total_day[model] = round(total_day.get(model, 0.0) + credit, 6)
-                        site_day[model] = round(site_day.get(model, 0.0) + credit, 6)
-                group["total_credits"] += usage["total_credits"]
-                group["requests"] += usage["requests"]
-                used += usage["total_credits"]
-                count += usage["requests"]
-            pool.apply_if_current(cm, generation, merge)
+            def store():
+                accounts[entry["id"]] = {"site": site, "by_day": usage["by_day"],
+                                         "total_credits": round(usage["total_credits"], 2),
+                                         "requests": usage["requests"],
+                                         "partial": bool(usage.get("partial")),
+                                         "fetched_at": time.time()}
+            pool.apply_if_current(cm, generation, store)
         except Exception as error:
-            _log(f"[usage] {Path(entry['id']).name} 明细拉取失败: {_network_error_text(error)}")
-    if any_success:
-        for group in groups.values():
-            group["total_credits"] = round(group["total_credits"], 2)
-        CONFIG["usage_daily"] = {"by_day": by_day, "groups": groups, "total_credits": round(used, 2),
-                                 "requests": count, "fetched_at": time.time()}
-        _log(f"[usage] 明细已同步: {count} 请求 / {used:.2f} credits")
+            stale.add(entry["id"])
+            _log(f"[usage] {Path(entry['id']).name} 明细拉取失败（保留其上次成功快照）: {_network_error_text(error)}")
+    _publish_usage_daily(pool, stale)
+
+
+def _publish_usage_daily(pool, stale=()):
+    """按当前启用账号的快照重建聚合视图；本轮失败的账号保留历史并列入 stale_accounts。
+
+    窗口说明：凭据身份更换后，旧快照最多残留一个同步周期，随后被新账号的快照替换。"""
+    accounts = CONFIG.get("usage_daily_accounts")
+    if not isinstance(accounts, dict):
+        accounts = {}
+    enabled = {e["id"] for e in pool.entries() if model_policy.credential_enabled(CONFIG, e)}
+    by_day, groups = {}, {}
+    used, count = 0.0, 0
+    partial = False
+    newest = 0.0
+    included = False
+    stale_out = []
+    for cred_id, snap in accounts.items():
+        if cred_id not in enabled:
+            continue
+        included = True
+        site = snap.get("site") or "domestic"
+        group = groups.setdefault(site, {"by_day": {}, "total_credits": 0.0, "requests": 0})
+        for day, models in (snap.get("by_day") or {}).items():
+            total_day = by_day.setdefault(day, {})
+            site_day = group["by_day"].setdefault(day, {})
+            for model, credit in models.items():
+                total_day[model] = round(total_day.get(model, 0.0) + credit, 6)
+                site_day[model] = round(site_day.get(model, 0.0) + credit, 6)
+        group["total_credits"] += float(snap.get("total_credits") or 0)
+        group["requests"] += int(snap.get("requests") or 0)
+        used += float(snap.get("total_credits") or 0)
+        count += int(snap.get("requests") or 0)
+        newest = max(newest, float(snap.get("fetched_at") or 0))
+        if snap.get("partial"):
+            partial = True
+        if cred_id in stale:
+            partial = True
+            stale_out.append(Path(cred_id).name)
+    if not included:
+        return  # 还没有任何成功快照：不覆盖已有视图
+    for group in groups.values():
+        group["total_credits"] = round(group["total_credits"], 2)
+    out = {"by_day": by_day, "groups": groups, "total_credits": round(used, 2),
+           "requests": count, "fetched_at": newest, "partial": partial}
+    if stale_out:
+        out["stale_accounts"] = sorted(stale_out)
+    CONFIG["usage_daily"] = out
+    _log(f"[usage] 明细已同步: {count} 请求 / {used:.2f} credits"
+         + (f" | {len(stale_out)} 账号保留历史快照" if stale_out else ""))
 
 
 def _housekeep_once(pool: CredentialPool, ledger, *, pending_only=False):
@@ -1353,7 +1392,8 @@ CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "model_guard": True,     # 表外模型本地拦截，不转发上游
                 "max_images": 16, "image_policy": "truncate",
                 "max_request_bytes": 32 * 1024 * 1024, "log_body_limit": 65536,
-                "usage_daily": None,     # 官方用量明细（日期×模型 credit），供 billing/usage 出 daily_costs
+                "usage_daily": None,     # 官方用量聚合视图（日期×模型 credit），供 billing/usage 出 daily_costs
+                "usage_daily_accounts": None,  # 按账号的用量快照；单账号失败不丢历史
                 "credit_price_cny": None, "credit_price_usd": None, "usd_rate": None,
                 "desensitize": False, "no_compact": False, "keep_tool_metadata": False}  # 单价 None=取 credits 模块默认
 
@@ -1773,6 +1813,8 @@ def _billing_totals() -> dict:
             "soonest_expiry": agg.get("soonest_expiry"),
             "price_cny": price_cny, "price_usd": price_usd, "rate": rate,
             "used_source": "official_usage_detail" if detail else "quota_delta",
+            # 任一端数据不完整（积分分页到顶 / 用量到顶 / 账号同步失败）时对外可见
+            "partial": bool(agg.get("partial") or cache.get("partial")),
             "groups": groups_out, "by_day": cache.get("by_day") or {}}
 
 
@@ -1808,17 +1850,27 @@ def billing_usage(start_date: Optional[str] = None, end_date: Optional[str] = No
     """OpenAI 用量端点：total_usage 单位美分；daily_costs 为官方明细按天×模型聚合（最近 30 天）。"""
     _check_auth(authorization, x_api_key)
     t = _billing_totals()
-    # 每 Credit 美分单价：按各站实际用量加权（保证 Σdaily 与 total_usage 一致）
-    cents_per_credit = ((t["used_usd"] * 100 / t["used"]) if t["used"]
-                        else t["price_cny"] / t["rate"] * 100)
+    # 逐站逐日按本站单价折算后再合并：两站单价不同，统一平均价会让每天/每模型的金额失真。
+    # Σdaily 与 total_usage 都由同一组分站用量算出，恒等关系保持不变。
+    cents = {"domestic": t["price_cny"] / t["rate"] * 100, "international": t["price_usd"] * 100}
+    detail = CONFIG.get("usage_daily") or {}
+    priced: dict = {}
+    for site, group in (detail.get("groups") or {}).items():
+        unit = cents.get(site)
+        if unit is None:
+            continue
+        for day, models in (group.get("by_day") or {}).items():
+            slot = priced.setdefault(day, {})
+            for model, credit in models.items():
+                slot[model] = slot.get(model, 0.0) + float(credit) * unit
     daily = []
-    for day in sorted(t["by_day"]):
+    for day in sorted(priced):
         if start_date and day < start_date:
             continue
         if end_date and day > end_date:
             continue
-        items = [{"name": m, "cost": round(c * cents_per_credit, 4)}
-                 for m, c in sorted(t["by_day"][day].items()) if c > 0]
+        items = [{"name": m, "cost": round(c, 4)}
+                 for m, c in sorted(priced[day].items()) if c > 0]
         try:
             ts = int(time.mktime(time.strptime(day, "%Y-%m-%d")))
         except ValueError:
@@ -1828,7 +1880,12 @@ def billing_usage(start_date: Optional[str] = None, end_date: Optional[str] = No
         total_cents = round(sum(sum(i["cost"] for i in d["line_items"]) for d in daily), 2)
     else:                      # 全量口径与 subscription 构成余额恒等式
         total_cents = round(t["used_usd"] * 100, 2)
-    return {"object": "list", "total_usage": total_cents, "daily_costs": daily}
+    out = {"object": "list", "total_usage": total_cents, "daily_costs": daily}
+    if t.get("partial"):
+        out["partial"] = True
+    if detail.get("stale_accounts"):
+        out["stale_accounts"] = detail["stale_accounts"]
+    return out
 
 
 # 对外模型表：云端 /v3/config 同步结果优先，DEFAULT_MODELS 兜底补充
@@ -2529,11 +2586,15 @@ async def _fetch_checked_chat(url, headers, body, model_name, rid, cred=None, *,
             observe_usage(result.get("usage") or {})
             return result
         # 审核拒绝不是工具损坏，不因 required 工具选择而重复生成。
-        if detector.detected or not body.get("tools") or tool_attempt >= _TOOL_CALL_MAX_RETRY:
+        budget = CONFIG.get("tool_call_max_retry", _TOOL_CALL_MAX_RETRY)
+        if detector.detected or not body.get("tools") or tool_attempt >= budget:
             raise UpstreamResponseError(502, b"Invalid upstream tool_calls after retries")
         tool_attempt += 1
-        _log(f"[{rid}] tool_calls 损坏，重试 {tool_attempt}/{_TOOL_CALL_MAX_RETRY} | {model_name}")
-
+        # 被丢弃的这次生成也是真实消耗：连同序号记进 attempts，账务不再只看见最后一次
+        discarded = result.get("usage") or {}
+        observe_attempt("tool_args_retry", attempt=tool_attempt, max_attempts=budget,
+                        total_tokens=discarded.get("total_tokens"))
+        _log(f"[{rid}] tool_calls 损坏，重试 {tool_attempt}/{budget} | {model_name}")
 
 async def _chat_sse_lines(url, headers, body, model_name, t0, rid, cred=None, *, aggregate=False):
     """提供公共 Chat SSE 行流；流式请求不做审核重试，正文检测缓冲有界。"""
@@ -2969,6 +3030,9 @@ def main():
     ap.add_argument("--log-body-limit", type=_nonnegative_int, metavar="BYTES",
                     default=os.environ.get("CODEBUDDY2API_LOG_BODY_LIMIT", "65536"),
                     help="每条正文日志的预览字节上限，默认 64 KiB；0 只记录摘要")
+    ap.add_argument("--tool-call-max-retry", type=_nonnegative_int, metavar="N",
+                    default=os.environ.get("CODEBUDDY2API_TOOL_CALL_MAX_RETRY", "3"),
+                    help="工具参数损坏时的额外生成上限，默认 3；0 表示不重试（每次额外生成都消耗额度）")
     ap.add_argument("--auto-trial", type=_boolean_arg, nargs="?", const=True,
                     default=os.environ.get("CODEBUDDY2API_AUTO_TRIAL", "false"),
                     help="自动领取国际 WorkBuddy 一次性体验积分，默认关闭")
@@ -2978,7 +3042,8 @@ def main():
     if args.command == "login":
         return login(site=args.site, open_browser=not args.no_browser)
 
-    for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit", "auto_trial"):
+    for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit", "auto_trial",
+                "tool_call_max_retry"):
         CONFIG[key] = getattr(args, key)
     CONFIG["api_key"] = args.api_key
     CONFIG["desensitize"] = args.desensitize
