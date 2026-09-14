@@ -589,6 +589,30 @@ def test_finish_reason_maps_to_terminal_status():
     print("✅ test_finish_reason_maps_to_terminal_status")
 
 
+def test_stream_events_carry_sequence_and_item_ids():
+    """每个事件带递增 sequence_number；text/reasoning/argument 增量事件带所属 item_id。"""
+    conv = ResponsesStreamConverter(model="glm-5.2")
+    chunks = [
+        'data: {"id":"s1","choices":[{"index":0,"delta":{"reasoning_content":"想"},"finish_reason":null}]}',
+        'data: {"id":"s1","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
+        'data: {"id":"s1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"shell","arguments":"{}"}}]},"finish_reason":null}]}',
+        'data: {"id":"s1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+    ]
+    raw = "".join(conv.feed_line(line) for line in chunks) + conv.finish()
+    evts = [json.loads(part[6:]) for part in raw.strip().split("\n\n") if part.startswith("data: ")]
+    seqs = [e["sequence_number"] for e in evts]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs
+    msg_ids = {e.get("item_id") for e in evts if e["type"].startswith(("response.output_text.", "response.content_part."))}
+    assert msg_ids == {conv.msg_id}, msg_ids
+    rs = [e for e in evts if e["type"].startswith("response.reasoning_summary_text.")]
+    assert rs and all(e["item_id"] == conv._reasoning_item_id for e in rs)
+    fc = [e for e in evts if e["type"].startswith("response.function_call_arguments.")]
+    fc_ids = {e.get("item_id") for e in fc}
+    assert len(fc_ids) == 1 and None not in fc_ids and next(iter(fc_ids)).startswith("fc_")
+
+    print("✅ test_stream_events_carry_sequence_and_item_ids")
+
+
 if __name__ == "__main__":
     test_simple_text_request()
     test_array_input_request()
@@ -608,4 +632,5 @@ if __name__ == "__main__":
     test_stream_converter_function_call()
     test_nonstream_response()
     test_finish_reason_maps_to_terminal_status()
-    print(f"\n🎉 All {18} tests passed!")
+    test_stream_events_carry_sequence_and_item_ids()
+    print(f"\n🎉 All {19} tests passed!")

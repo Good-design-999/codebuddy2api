@@ -291,7 +291,7 @@ class ResponsesStreamConverter:
         self._tool_calls: dict[int, dict] = {}  # index → {id, name, args, fc_id, output_idx, emitted}
         self._finish_reason: str | None = None
         self._usage: dict | None = None
-
+        self._seq = 0  # 事件序号：每个发出的事件递增
     # ---- 公开接口 ----
 
     def feed_line(self, line: str) -> str:
@@ -316,7 +316,8 @@ class ResponsesStreamConverter:
         # 关闭 reasoning item
         if self._emitted_reasoning_item:
             events.append(self._evt("response.reasoning_summary_text.done", {
-                "output_index": 0, "summary_index": 0, "text": self._reasoning
+                "output_index": 0, "summary_index": 0, "text": self._reasoning,
+                "item_id": self._reasoning_item_id
             }))
             events.append(self._evt("response.output_item.done", {
                 "output_index": 0, "item": self._reasoning_item(status)
@@ -325,11 +326,13 @@ class ResponsesStreamConverter:
         # 关闭 text content
         if self._emitted_content_part:
             events.append(self._evt("response.output_text.done", {
-                "output_index": self._msg_idx(), "content_index": 0, "text": self._content
+                "output_index": self._msg_idx(), "content_index": 0, "text": self._content,
+                "item_id": self.msg_id
             }))
             events.append(self._evt("response.content_part.done", {
                 "output_index": self._msg_idx(), "content_index": 0,
-                "part": {"type": "output_text", "text": self._content, "annotations": []}
+                "part": {"type": "output_text", "text": self._content, "annotations": []},
+                "item_id": self.msg_id
             }))
 
         if self._emitted_msg_item:
@@ -344,7 +347,7 @@ class ResponsesStreamConverter:
             if tc.get("emitted"):
                 oi = tc["output_idx"]
                 events.append(self._evt("response.function_call_arguments.done", {
-                    "output_index": oi, "arguments": tc["args"]
+                    "output_index": oi, "arguments": tc["args"], "item_id": tc["fc_id"]
                 }))
                 events.append(self._evt("response.output_item.done", {
                     "output_index": oi, "item": self._fc_item(tc, status)
@@ -407,7 +410,8 @@ class ResponsesStreamConverter:
                     self._emitted_reasoning_item = True
                 self._reasoning += reasoning
                 events.append(self._evt("response.reasoning_summary_text.delta", {
-                    "output_index": 0, "summary_index": 0, "delta": reasoning
+                    "output_index": 0, "summary_index": 0, "delta": reasoning,
+                    "item_id": self._reasoning_item_id
                 }))
 
             # 当前适配器只发 output_text；拒绝说明也保留为合法文本，不丢弃原文。
@@ -423,13 +427,15 @@ class ResponsesStreamConverter:
                 if not self._emitted_content_part:
                     events.append(self._evt("response.content_part.added", {
                         "output_index": self._msg_idx(), "content_index": 0,
-                        "part": {"type": "output_text", "text": "", "annotations": []}
+                        "part": {"type": "output_text", "text": "", "annotations": []},
+                        "item_id": self.msg_id
                     }))
                     self._emitted_content_part = True
 
                 self._content += content
                 events.append(self._evt("response.output_text.delta", {
-                    "output_index": self._msg_idx(), "content_index": 0, "delta": content
+                    "output_index": self._msg_idx(), "content_index": 0, "delta": content,
+                    "item_id": self.msg_id
                 }))
 
             # ---- tool_calls delta ----
@@ -469,7 +475,7 @@ class ResponsesStreamConverter:
                     slot["args"] += fn["arguments"]
                     events.append(self._evt("response.function_call_arguments.delta", {
                         "output_index": slot["output_idx"],
-                        "delta": fn["arguments"]
+                        "delta": fn["arguments"], "item_id": slot["fc_id"]
                     }))
 
             if finish:
@@ -478,8 +484,9 @@ class ResponsesStreamConverter:
         return "".join(events)
 
     def _evt(self, event_type: str, data: dict) -> str:
-        """格式化一个 SSE 事件。"""
-        payload = {"type": event_type, **data}
+        """格式化一个 SSE 事件；sequence_number 单调递增，供客户端校验事件顺序。"""
+        self._seq += 1
+        payload = {"type": event_type, **data, "sequence_number": self._seq}
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     def _msg_idx(self) -> int:
