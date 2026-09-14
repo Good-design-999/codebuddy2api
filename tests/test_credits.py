@@ -583,6 +583,28 @@ def test_fetch_credits_paginates_until_short_page():
                           lambda: credits.fetch_credits(token))
     assert len(seen) == credits.CREDITS_MAX_PAGES
     assert result["partial"] is True
+
+    # 第 2 页的瞬时空响应也要重试：不能在非首页把空页当作结束
+    calls = {"n": 0}
+    sequence = [full_page, {"code": 0, "data": {"Response": {"Data": {"Accounts": []}}}}, short_page]
+
+    class FlakyClient:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def post(self, url, headers=None, json=None, timeout=None):
+            calls["n"] += 1
+            payload = sequence[min(calls["n"] - 1, len(sequence) - 1)]
+
+            class Resp:
+                status_code = 200
+                def json(self):
+                    return payload
+            return Resp()
+
+    result = _with_client(FlakyClient, lambda: credits.fetch_credits(token))
+    assert result["count"] == 101 and result["partial"] is False, result
     print("✅ test_fetch_credits_paginates_until_short_page")
 
 
