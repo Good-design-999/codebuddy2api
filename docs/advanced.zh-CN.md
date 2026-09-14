@@ -32,7 +32,7 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 | `--tool-call-max-retry` | `3` | 工具参数损坏时的额外生成上限（每次都消耗额度）；`0` 不重试 |
 | `--max-inbound-bytes` | `67108864` | 入站原始请求体字节上限（解析前在 ASGI 层生效，含 chunked），超限返回 413 |
 | `--max-collect-bytes` | `8388608` | 聚合路径输出收集总字节上限（正文+思考+工具参数），超限返回 `response_too_large`；`0` 不限制 |
-| `--max-concurrent` | `64` | 推理端点并发上限，占满立即 503（含 Retry-After）；`0` 不限制 |
+| `--max-concurrent` | `64` | 仅限制三个生成端点；占满立即 503（含 Retry-After），不限制 token 估算；`0` 不限制 |
 | `--max-request-bytes` | `33554432` | 处理后的上游 JSON 字节上限，须为正整数 |
 | `--log-body-limit` | `65536` | 兼容文本日志正文预览字节；`0` 只记摘要，不控制 SQLite 诊断预算 |
 
@@ -139,6 +139,7 @@ WebUI 可以直接上传文件；以下限制针对 `POST /admin/credentials` �
 ## 部署暴露与凭据导入
 
 - Compose 端口映射默认只绑回环（`CODEBUDDY2API_BIND` 默认 127.0.0.1）；原生运行绑定非回环地址且未设 API key 时拒绝启动，须显式设 `CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true`。
+- 配置 key 时，`/v1/*` 在缓冲请求体、预留推理名额之前校验请求头；即使名额已满，无效 key 仍返回 401。
 - 凭据导入/上传在落盘前把 token 别名归一化为官方字段名；严格 JSON 解析拒绝 NaN/Infinity，`expiresAt`/`lastRefreshTime` 必须是合理的有限毫秒时间戳。
 
 ## 账务数据完整性

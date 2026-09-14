@@ -73,6 +73,7 @@ from app.observability import (AuditMiddleware, observe_route, observe_usage,
 from app.credential_io import (CredentialFileError, read_import_file, atomic_write_credential,
                                credential_file_lock)
 from app.upstream_io import ChatSSEAccumulator, UpstreamResponseError, open_backend_stream, read_bounded_error
+from app.inference_auth import require_api_key
 from app.content_filter import ContentFilterDetector, is_filter_error
 from app.request_limits import ImageLimitError, apply_image_policy
 from app.safe_logging import format_log_body, sanitize_log_text
@@ -1468,16 +1469,7 @@ def _truncate(s: str, n: int = 80) -> str:
 
 
 def _check_auth(authorization: Optional[str], x_api_key: Optional[str]):
-    key = CONFIG["api_key"]
-    if not key:
-        return
-    token = ""
-    if isinstance(authorization, str) and authorization.startswith("Bearer "):
-        token = authorization[7:].strip()
-    if not token and isinstance(x_api_key, str):
-        token = x_api_key
-    if not secrets.compare_digest(token.encode(), key.encode()):
-        raise HTTPException(status_code=401, detail={"error": {"message": "invalid api key", "type": "auth_error"}})
+    require_api_key(CONFIG["api_key"], authorization, x_api_key)
 
 
 def _check_admin_auth(authorization: Optional[str], x_api_key: Optional[str]):

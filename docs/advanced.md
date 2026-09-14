@@ -32,7 +32,7 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 | `--tool-call-max-retry` | `3` | Extra generations after malformed tool calls (each consumes credits); `0` disables retries |
 | `--max-inbound-bytes` | `67108864` | Raw inbound body byte limit enforced at the ASGI layer before parsing (chunked included); 413 beyond it |
 | `--max-collect-bytes` | `8388608` | Total collection budget for aggregated output (content + reasoning + tool arguments); `response_too_large` beyond it; `0` disables |
-| `--max-concurrent` | `64` | Inference concurrency limit; excess requests get an immediate 503 with Retry-After; `0` disables |
+| `--max-concurrent` | `64` | Concurrency limit for the three generation endpoints only; excess requests get 503 with Retry-After; token counting is unaffected; `0` disables |
 | `--max-request-bytes` | `33554432` | Positive byte limit for the processed upstream JSON |
 | `--log-body-limit` | `65536` | Text-log body preview bytes; `0` logs summaries only, not the SQLite diagnostic budget |
 
@@ -139,6 +139,7 @@ Credential domain / token issuer determine the product identity. Chat and refres
 ## Deployment exposure and credential intake
 
 - The compose port mapping binds loopback by default (`CODEBUDDY2API_BIND` defaults to 127.0.0.1); a native run bound to a non-loopback host with an empty API key refuses to start unless `CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true` is set explicitly.
+- When a key is configured, `/v1/*` verifies request headers before buffering bodies or reserving inference capacity; invalid keys return 401 even while generation slots are full.
 - Credential imports/uploads persist the normalized form (token aliases folded into the canonical fields); strict JSON parsing rejects NaN/Infinity, and `expiresAt`/`lastRefreshTime` must be plausible finite millisecond timestamps.
 
 ## Billing data integrity

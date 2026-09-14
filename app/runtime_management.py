@@ -8,6 +8,7 @@ from .admin_api import install_admin
 from .audit_store import AuditStore
 from .control_store import ControlStore
 from .gateway_management import Management, install_pages
+from .inference_auth import InferenceAuthMiddleware
 from .model_policy import PolicyScopeMiddleware
 from .observability import AuditMiddleware
 from .settings import SCHEMA, apply_persisted_settings
@@ -93,8 +94,9 @@ def install(gateway):
     app.add_middleware(PolicyScopeMiddleware)
     from .inbound_limits import ConcurrencyLimitMiddleware, InboundBodyLimitMiddleware
     app.add_middleware(InboundBodyLimitMiddleware, config=config)
-    # 最外层：并发名额先用完即 503，再进行请求体缓冲与处理
     app.add_middleware(ConcurrencyLimitMiddleware, config=config)
+    # 最外层先校验请求头；未鉴权的慢请求不得占用推理名额或进入请求体缓冲。
+    app.add_middleware(InferenceAuthMiddleware, config=config)
     install_pages(app, Path(gateway.__file__).resolve().parent / "web" / "dist")
 
 
