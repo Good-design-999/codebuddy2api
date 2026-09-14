@@ -16,6 +16,7 @@ import asyncio
 
 
 _GATED_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
+_BODY_PATHS = (*_GATED_PATHS, "/v1/messages/count_tokens")
 
 
 class ConcurrencyLimitMiddleware:
@@ -68,14 +69,15 @@ class ConcurrencyLimitMiddleware:
 
 
 class InboundBodyLimitMiddleware:
-    """/v1/* 请求的原始字节上限；limit<=0 时关闭。"""
+    """仅缓冲生成及 token 估算 POST；其他路由不读取请求体。"""
 
     def __init__(self, app, config):
         self.app = app
         self.config = config
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or not scope.get("path", "").startswith("/v1/"):
+        if (scope["type"] != "http" or scope.get("method") != "POST"
+                or scope.get("path", "") not in _BODY_PATHS):
             return await self.app(scope, receive, send)
         try:
             limit = int(self.config.get("max_inbound_bytes") or 0)

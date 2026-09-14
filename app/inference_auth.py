@@ -6,9 +6,7 @@ from fastapi import HTTPException
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 
-from .inbound_limits import _GATED_PATHS
-
-_BODY_PATHS = (*_GATED_PATHS, "/v1/messages/count_tokens")
+from .inbound_limits import _BODY_PATHS
 
 
 def require_api_key(key, authorization=None, x_api_key=None):

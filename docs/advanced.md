@@ -30,7 +30,7 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 | `--max-images` | `16` | Total images per request; `0` permits no images |
 | `--image-policy` | `truncate` | Keep newest images; `error` rejects excess images with 413 |
 | `--tool-call-max-retry` | `3` | Extra generations after malformed tool calls (each consumes credits); `0` disables retries |
-| `--max-inbound-bytes` | `67108864` | Raw inbound body byte limit enforced at the ASGI layer before parsing (chunked included); 413 beyond it |
+| `--max-inbound-bytes` | `67108864` | Raw body limit for generation and token-count POSTs, before parsing (chunked included); other routes are not buffered; 413 beyond it |
 | `--max-collect-bytes` | `8388608` | Total collection budget for aggregated output (content + reasoning + tool arguments); `response_too_large` beyond it; `0` disables |
 | `--max-concurrent` | `64` | Concurrency limit for the three generation endpoints only; excess requests get 503 with Retry-After; token counting is unaffected; `0` disables |
 | `--max-request-bytes` | `33554432` | Positive byte limit for the processed upstream JSON |

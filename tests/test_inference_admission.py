@@ -28,6 +28,12 @@ class InferenceAdmissionTests(unittest.IsolatedAsyncioTestCase):
         async def endpoint(request: Request):
             return {"size": len(await request.body())}
 
+        @app.get("/v1/models")
+        async def models(request: Request):
+            from app.inference_auth import require_api_key
+            require_api_key(self.config["api_key"], request.headers.get("authorization"))
+            return {"object": "list", "data": []}
+
         for path in (*ROUTES, "/v1/messages/count_tokens", "/admin/test"):
             app.add_api_route(path, endpoint, methods=["POST"])
         gateway = SimpleNamespace(app=app, CONFIG=self.config, __file__=str(Path(__file__).parent.parent / "converter.py"))
@@ -128,8 +134,16 @@ class InferenceAdmissionTests(unittest.IsolatedAsyncioTestCase):
                                        ("/v1/messages/unknown", "POST", 404),
                                        ("/v1/messages", "GET", 405)):
             with self.subTest(path=path, method=method):
-                status, body = await self.request(path, method=method)
+                status, body = await self.request(path, method=method, forbid_receive=True)
                 self.assertEqual(status, expected, body)
+
+
+    async def test_bodyless_models_reaches_route_auth_without_buffering(self):
+        for headers, expected in (((), 401), (((b"authorization", b"Bearer synthetic-key"),), 200)):
+            with self.subTest(status=expected):
+                status, body = await self.request("/v1/models", headers, method="GET", forbid_receive=True)
+                self.assertEqual(status, expected, body)
+                self.assertIsNone(self.gate._semaphore)
 
 
     async def test_disabled_gate_still_authenticates_and_empty_key_remains_optional(self):

@@ -630,7 +630,7 @@ class InboundBodyLimitTests(unittest.TestCase):
             sent.append(message)
 
         import asyncio
-        asyncio.run(middleware({"type": "http", "path": "/v1/chat/completions"}, receive, send))
+        asyncio.run(middleware({"type": "http", "method": "POST", "path": "/v1/chat/completions"}, receive, send))
         self.assertFalse(reached)  # 超限请求不进入下游
         self.assertEqual(sent[0]["status"], 413)
 
