@@ -48,8 +48,13 @@ class ConcurrencyLimitMiddleware:
             return await self.app(scope, receive, send)
         gate = self._gate()
         if gate.locked():  # 无空闲名额：立即失败并给出重试提示
-            raw = json.dumps({"error": {"message": "inference concurrency limit reached, retry later",
-                                        "type": "rate_limit_error", "code": "concurrency_limit"}}).encode()
+            error = {"message": "inference concurrency limit reached, retry later",
+                     "type": "rate_limit_error", "code": "concurrency_limit"}
+            payload = {"error": error}
+            if scope["path"] == "/v1/messages":
+                error["type"] = "api_error"
+                payload["type"] = "error"
+            raw = json.dumps(payload).encode()
             await send({"type": "http.response.start", "status": 503,
                         "headers": [(b"content-type", b"application/json"), (b"retry-after", b"3"),
                                     (b"content-length", str(len(raw)).encode())]})

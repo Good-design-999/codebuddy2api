@@ -661,13 +661,28 @@ class ConcurrencyLimitTests(unittest.IsolatedAsyncioTestCase):
             sent.append(message)
 
         first = asyncio.create_task(mw(scope, receive, send))
-        await asyncio.wait_for(entered.wait(), 2)
-        await mw(scope, receive, send)
-        starts = [m for m in sent if m["type"] == "http.response.start"]
-        self.assertEqual(starts[-1]["status"], 503)
-        self.assertIn(b"retry-after", dict(starts[-1]["headers"]))
-        release.set()
-        await asyncio.wait_for(first, 2)
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            for path in ROUTES:
+                with self.subTest(path=path):
+                    sent.clear()
+                    await mw({**scope, "path": path}, receive, send)
+                    self.assertEqual(sent[0]["status"], 503)
+                    headers = dict(sent[0]["headers"])
+                    self.assertEqual(headers[b"retry-after"], b"3")
+                    body = sent[1]["body"]
+                    self.assertEqual(int(headers[b"content-length"]), len(body))
+                    payload = json.loads(body)
+                    self.assertEqual(payload["error"]["code"], "concurrency_limit")
+                    if path == "/v1/messages":
+                        self.assertEqual(payload["type"], "error")
+                        self.assertEqual(payload["error"]["type"], "api_error")
+                    else:
+                        self.assertNotIn("type", payload)
+                        self.assertEqual(payload["error"]["type"], "rate_limit_error")
+        finally:
+            release.set()
+            await asyncio.wait_for(first, 2)
         sent.clear()
         await mw(scope, receive, send)
         self.assertEqual(sent[0]["status"], 200)
