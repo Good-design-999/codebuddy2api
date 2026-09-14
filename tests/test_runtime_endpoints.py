@@ -76,6 +76,118 @@ class EndpointTests(unittest.TestCase):
         self.requests.append(request)
         return self.respond(request)
 
+    def test_stateful_responses_fields_are_rejected(self):
+        """previous_response_id/conversation 依赖服务端历史：本网关无状态，必须显式 400。"""
+        for field, value in (("previous_response_id", "resp_abc"), ("conversation", "conv_abc")):
+            with self.subTest(field=field):
+                self.requests.clear()
+                response = self.client.post("/v1/responses", json={
+                    "model": "auto", "input": [{"role": "user", "content": "hi"}], field: value})
+                self.assertEqual(response.status_code, 400, response.text)
+                body = response.json()
+                error = body.get("error") or body["detail"]["error"]
+                self.assertEqual(error["param"], field)
+                self.assertEqual(len(self.requests), 0)
+
+    def test_multiple_candidates_are_rejected_before_reaching_upstream(self):
+        """聚合路径无法保持多候选独立：n 只能缺省或恰为 1。"""
+        for n in (2, 0, "2", True, 1.5):
+            with self.subTest(n=n):
+                self.requests.clear()
+                response = self.client.post("/v1/chat/completions", json={
+                    "model": "auto", "messages": [{"role": "user", "content": "hi"}], "n": n})
+                self.assertEqual(response.status_code, 400, response.text)
+                body = response.json()
+                error = body.get("error") or body["detail"]["error"]
+                self.assertEqual(error["param"], "n")
+                self.assertEqual(len(self.requests), 0)
+        self.requests.clear()
+        response = self.client.post("/v1/chat/completions", json={
+            "model": "auto", "messages": [{"role": "user", "content": "hi"}], "n": 1})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(self.requests), 1)
+
+    def test_tool_arguments_must_be_objects_of_declared_tools(self):
+        """解析成功不等于正确：非对象参数或未声明的函数名都不健康。"""
+        body = {"tools": TOOLS}
+        call = lambda name, args: [{"id": "c1", "function": {"name": name, "arguments": args}}]
+        healthy = converter._tool_calls_healthy
+        self.assertTrue(healthy(None, body))
+        self.assertTrue(healthy(call("synthetic_tool", "{}"), body))
+        self.assertTrue(healthy(call("synthetic_tool", "{\"x\": 1}"), body))
+        for bad_args in ("null", "[]", "42", "\"text\"", "{"):
+            with self.subTest(args=bad_args):
+                self.assertFalse(healthy(call("synthetic_tool", bad_args), body))
+        self.assertFalse(healthy(call("undeclared", "{}"), body))
+        self.assertFalse(healthy(call("", "{}"), body))
+        # 未声明任何工具的请求不做名称核对：合法 JSON 对象的工具调用仍算健康
+        self.assertTrue(healthy(call("anything", "{}"), {"tools": []}))
+        self.assertTrue(healthy(call("anything", "{}"), None))
+
+    def test_count_tokens_estimates_instead_of_constant_zero(self):
+        """计数端点返回随输入增长的估算值，而不是伪装精确的常量 0。"""
+        short = self.client.post("/v1/messages/count_tokens", json={
+            "model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(short.status_code, 200, short.text)
+        small = short.json()["input_tokens"]
+        self.assertGreater(small, 0)
+        long = self.client.post("/v1/messages/count_tokens", json={
+            "model": "auto", "system": "s" * 400,
+            "messages": [{"role": "user", "content": "x" * 4000}]})
+        big = long.json()["input_tokens"]
+        self.assertGreater(big, small)
+        cjk = self.client.post("/v1/messages/count_tokens", json={
+            "model": "auto", "messages": [{"role": "user", "content": "汉" * 100}]})
+        self.assertGreaterEqual(cjk.json()["input_tokens"], 100)  # 非 ASCII 不按 4 字符折算低估
+        bad = self.client.post("/v1/messages/count_tokens", content=b"{ not json",
+                               headers={"Content-Type": "application/json"})
+        self.assertEqual(bad.status_code, 400)
+
+    def test_inference_errors_follow_the_client_protocol_shape(self):
+        """OpenAI 路由顶层 error；Anthropic 路由 error 对象；/admin 保持 detail 包装。"""
+        converter.CONFIG["api_key"] = "secret"
+        try:
+            for route in ("/v1/chat/completions", "/v1/responses"):
+                with self.subTest(route=route):
+                    response = self.client.post(route, json={})
+                    self.assertEqual(response.status_code, 401, response.text)
+                    body = response.json()
+                    self.assertIn("error", body)
+                    self.assertNotIn("detail", body)
+                    self.assertEqual(body["error"]["type"], "auth_error")
+            response = self.client.post("/v1/messages", json={})
+            self.assertEqual(response.status_code, 401, response.text)
+            body = response.json()
+            self.assertEqual(body["type"], "error")
+            self.assertEqual(body["error"]["type"], "authentication_error")
+            response = self.client.get("/admin/credentials")
+            self.assertEqual(response.status_code, 401, response.text)
+            self.assertIn("detail", response.json())
+        finally:
+            converter.CONFIG["api_key"] = ""
+
+    def test_omitted_stream_defaults_to_nonstream_and_bad_type_rejected(self):
+        """省略 stream 按协议默认非流式返回完整 JSON；非布尔 stream 显式 400。"""
+        bodies = {
+            "/v1/chat/completions": {"model": "auto", "messages": [{"role": "user", "content": "hi"}]},
+            "/v1/responses": {"model": "auto", "input": [{"role": "user", "content": "hi"}]},
+            "/v1/messages": {"model": "auto", "max_tokens": 64,
+                             "messages": [{"role": "user", "content": "hi"}]},
+        }
+        for route, body in bodies.items():
+            with self.subTest(route=route):
+                self.requests.clear()
+                response = self.client.post(route, json=body)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.headers["content-type"], "application/json")
+                self.assertNotIn("data:", response.text)
+                response = self.client.post(route, json={**body, "stream": "true"})
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["error"]["param"], "stream")
+                response = self.client.post(route, json={**body, "stream": False})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.headers["content-type"], "application/json")
+
     def test_tool_metadata_policy_reaches_all_protocols(self):
         description = "Read sandbox data without destructive changes."
         schema = {"type": "object", "title": "Lookup inputs", "properties": {
@@ -124,7 +236,7 @@ class EndpointTests(unittest.TestCase):
                     payload["tools"] = [{"type": "function", "function": function}]
                 response = self.client.post(route, json=payload)
                 self.assertEqual(response.status_code, 413, response.text)
-                self.assertEqual(response.json()["detail"]["error"]["code"], "request_too_large")
+                self.assertEqual(response.json()["error"]["code"], "request_too_large")
         self.credentials.assert_not_called()
         self.assertFalse(self.requests)
 
@@ -154,7 +266,7 @@ class EndpointTests(unittest.TestCase):
                 with self.subTest(route=route, stream=stream):
                     response = self.client.post(route, json=payload_for(route, 17, stream))
                     self.assertEqual(response.status_code, 413)
-                    error = response.json()["detail"]["error"]
+                    error = response.json()["error"]
                     self.assertEqual((error["code"], error["image_count"], error["max_images"]),
                                      ("too_many_images", 17, 16))
         self.credentials.assert_not_called()
@@ -184,7 +296,7 @@ class EndpointTests(unittest.TestCase):
         payload["messages"][0]["content"][1]["image_url"]["url"] = "data:image/png;base64," + "A" * 2000
         response = self.client.post(ROUTES[0], json=payload)
         self.assertEqual(response.status_code, 413)
-        self.assertEqual(response.json()["detail"]["error"]["code"], "request_too_large")
+        self.assertEqual(response.json()["error"]["code"], "request_too_large")
         self.credentials.assert_not_called()
         self.assertFalse(self.requests)
 

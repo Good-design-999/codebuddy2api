@@ -90,13 +90,21 @@ def anthropic_request_to_chat(body: dict) -> dict:
                 chat["tool_choice"] = "required" if kind == "any" else kind
             else:
                 raise ValueError("unsupported tool_choice type")
+            # 禁止并行工具调用的约束必须传到上游，不接受后静默丢失
+            if isinstance(tc.get("disable_parallel_tool_use"), bool):
+                chat["parallel_tool_calls"] = not tc["disable_parallel_tool_use"]
         elif isinstance(tc, str):
             chat["tool_choice"] = tc if tc in ("none", "auto", "required") else {"type": "function", "function": {"name": tc}}
-
     # 透传常见参数
     for key in ("temperature", "top_p", "stop", "top_k"):
         if key in body:
             chat[key] = body[key]
+    # Anthropic 正式停止序列字段；显式 stop 优先
+    stop_sequences = body.get("stop_sequences")
+    if stop_sequences is not None and "stop" not in chat:
+        if not isinstance(stop_sequences, list) or not all(isinstance(s, str) for s in stop_sequences):
+            raise ValueError("stop_sequences must be an array of strings")
+        chat["stop"] = stop_sequences
 
     return chat
 
@@ -146,9 +154,13 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
                 output = block.get("content", "")
                 if isinstance(output, list):
                     output = _convert_content_blocks(output)
+                if block.get("is_error") is True:
+                    # Chat 协议无等价字段：失败标记编码进正文前缀，模型不再把失败当有效结果
+                    output = "[tool execution failed]\n" + (output or "")
                 result.append({"role": "tool", "tool_call_id": tc_id, "content": output})
         if user_blocks:
-            result.insert(0, {"role": "user", "content": _convert_content_blocks(user_blocks)})
+            # 工具结果必须紧随 assistant 的 tool_calls；普通文本排在它们之后
+            result.append({"role": "user", "content": _convert_content_blocks(user_blocks)})
         return result
 
     # assistant 角色

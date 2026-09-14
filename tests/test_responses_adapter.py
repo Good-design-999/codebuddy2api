@@ -563,6 +563,121 @@ def test_nonstream_response():
     print("✅ test_nonstream_response")
 
 
+def test_finish_reason_maps_to_terminal_status():
+    """长度截断与内容过滤不得标记 completed：流式发 response.incomplete，非流式带 incomplete_details。"""
+    conv = ResponsesStreamConverter(model="glm-5.2")
+    conv.feed_line('data: {"id":"c2","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"c2","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}')
+    tail = conv.finish()
+    assert '"type": "response.incomplete"' in tail and '"type": "response.completed"' not in tail
+    resp = conv.get_nonstream_response()
+    assert resp["status"] == "incomplete"
+    assert resp["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert resp["output"][0]["status"] == "incomplete"
+
+    conv = ResponsesStreamConverter(model="glm-5.2")
+    conv.feed_line('data: {"id":"c3","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}')
+    resp = conv.get_nonstream_response()
+    assert resp["status"] == "incomplete" and resp["incomplete_details"]["reason"] == "content_filter"
+
+    conv = ResponsesStreamConverter(model="glm-5.2")
+    conv.feed_line('data: {"id":"c4","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"c4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}')
+    assert '"type": "response.completed"' in conv.finish()
+    assert "incomplete_details" not in conv.get_nonstream_response()
+
+    print("✅ test_finish_reason_maps_to_terminal_status")
+
+
+def test_stream_events_carry_sequence_and_item_ids():
+    """每个事件带递增 sequence_number；text/reasoning/argument 增量事件带所属 item_id。"""
+    conv = ResponsesStreamConverter(model="glm-5.2")
+    chunks = [
+        'data: {"id":"s1","choices":[{"index":0,"delta":{"reasoning_content":"想"},"finish_reason":null}]}',
+        'data: {"id":"s1","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
+        'data: {"id":"s1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"shell","arguments":"{}"}}]},"finish_reason":null}]}',
+        'data: {"id":"s1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+    ]
+    raw = "".join(conv.feed_line(line) for line in chunks) + conv.finish()
+    evts = [json.loads(part[6:]) for part in raw.strip().split("\n\n") if part.startswith("data: ")]
+    seqs = [e["sequence_number"] for e in evts]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs
+    msg_ids = {e.get("item_id") for e in evts if e["type"].startswith(("response.output_text.", "response.content_part."))}
+    assert msg_ids == {conv.msg_id}, msg_ids
+    rs = [e for e in evts if e["type"].startswith("response.reasoning_summary_text.")]
+    assert rs and all(e["item_id"] == conv._reasoning_item_id for e in rs)
+    fc = [e for e in evts if e["type"].startswith("response.function_call_arguments.")]
+    fc_ids = {e.get("item_id") for e in fc}
+    assert len(fc_ids) == 1 and None not in fc_ids and next(iter(fc_ids)).startswith("fc_")
+
+    print("✅ test_stream_events_carry_sequence_and_item_ids")
+
+
+def test_usage_maps_cached_tokens_and_omits_when_unknown():
+    """上游 cached_tokens/cache_read_input_tokens 透传；都没有时不出 input_tokens_details。"""
+    conv = ResponsesStreamConverter(model="m")
+    conv.feed_line('data: {"id":"u1","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"u1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":7}}}')
+    assert conv.get_nonstream_response()["usage"]["input_tokens_details"] == {"cached_tokens": 7}
+
+    conv = ResponsesStreamConverter(model="m")
+    conv.feed_line('data: {"id":"u2","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"u2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10,"cache_read_input_tokens":3}}')
+    assert conv.get_nonstream_response()["usage"]["input_tokens_details"] == {"cached_tokens": 3}
+
+    conv = ResponsesStreamConverter(model="m")
+    conv.feed_line('data: {"id":"u3","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"u3","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10}}')
+    assert "input_tokens_details" not in conv.get_nonstream_response()["usage"]
+
+    print("✅ test_usage_maps_cached_tokens_and_omits_when_unknown")
+
+
+def test_reasoning_effort_and_text_format_are_mapped():
+    """reasoning.effort / text.format 进入上游请求；顶层字段优先；不支持的 format 显式报错。"""
+    chat = responses_request_to_chat({"input": "hi", "reasoning": {"effort": "high"},
+                                      "text": {"format": {"type": "json_object"}}})
+    assert chat["reasoning_effort"] == "high"
+    assert chat["response_format"] == {"type": "json_object"}
+
+    chat = responses_request_to_chat({"input": "hi", "reasoning_effort": "low",
+                                      "reasoning": {"effort": "high"}})
+    assert chat["reasoning_effort"] == "low"  # 顶层显式字段优先
+
+    chat = responses_request_to_chat({"input": "hi", "text": {"format": {
+        "type": "json_schema", "name": "answer", "strict": True,
+        "schema": {"type": "object", "properties": {"a": {"type": "integer"}}}}}})
+    fmt = chat["response_format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["json_schema"]["name"] == "answer" and fmt["json_schema"]["strict"] is True
+    assert fmt["json_schema"]["schema"]["properties"]["a"]["type"] == "integer"
+
+    chat = responses_request_to_chat({"input": "hi", "text": {"format": {"type": "text"}}})
+    assert "response_format" not in chat
+
+    try:
+        responses_request_to_chat({"input": "hi", "text": {"format": {"type": "xml"}}})
+        raise AssertionError("unsupported text.format must raise")
+    except ValueError:
+        pass
+
+    print("✅ test_reasoning_effort_and_text_format_are_mapped")
+
+def test_parallel_tool_calls_roundtrip():
+    """parallel_tool_calls 透传到上游请求，且响应对象如实回报请求值而非固定 True。"""
+    chat = responses_request_to_chat({"input": "hi", "parallel_tool_calls": False})
+    assert chat["parallel_tool_calls"] is False
+    conv = ResponsesStreamConverter(model="m", parallel_tool_calls=False)
+    conv.feed_line('data: {"id":"p1","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"p1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}')
+    assert conv.get_nonstream_response()["parallel_tool_calls"] is False
+    conv = ResponsesStreamConverter(model="m")
+    conv.feed_line('data: {"id":"p2","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"p2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}')
+    assert conv.get_nonstream_response()["parallel_tool_calls"] is True
+    print("✅ test_parallel_tool_calls_roundtrip")
+
+
 if __name__ == "__main__":
     test_simple_text_request()
     test_array_input_request()
@@ -581,4 +696,9 @@ if __name__ == "__main__":
     test_stream_converter_text()
     test_stream_converter_function_call()
     test_nonstream_response()
-    print(f"\n🎉 All {17} tests passed!")
+    test_finish_reason_maps_to_terminal_status()
+    test_stream_events_carry_sequence_and_item_ids()
+    test_usage_maps_cached_tokens_and_omits_when_unknown()
+    test_reasoning_effort_and_text_format_are_mapped()
+    test_parallel_tool_calls_roundtrip()
+    print(f"\n🎉 All {22} tests passed!")

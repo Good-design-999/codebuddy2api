@@ -27,6 +27,30 @@ def _rand_id(prefix: str = "resp_") -> str:
 # 请求转换：Responses → Chat
 # ---------------------------------------------------------------------------
 
+def _text_format_to_response_format(fmt) -> dict | None:
+    """Responses text.format → Chat response_format；只转换语义等价的形态，其余显式报错。"""
+    if fmt is None:
+        return None
+    if not isinstance(fmt, dict):
+        raise ValueError("text.format must be an object")
+    kind = fmt.get("type")
+    if kind in (None, "text"):
+        return None
+    if kind == "json_object":
+        return {"type": "json_object"}
+    if kind == "json_schema":
+        schema = fmt.get("schema")
+        if not isinstance(schema, dict):
+            raise ValueError("text.format json_schema requires a schema object")
+        js: dict[str, Any] = {"name": fmt.get("name") or "response", "schema": schema}
+        if "strict" in fmt:
+            js["strict"] = bool(fmt["strict"])
+        if isinstance(fmt.get("description"), str):
+            js["description"] = fmt["description"]
+        return {"type": "json_schema", "json_schema": js}
+    raise ValueError(f"unsupported text.format type: {kind}")
+
+
 def responses_request_to_chat(body: dict) -> dict:
     """将 Responses API 请求体转换为 Chat Completions 请求体。
 
@@ -67,10 +91,21 @@ def responses_request_to_chat(body: dict) -> dict:
     # 透传常见参数
     for key in ("temperature", "top_p", "stop", "seed",
                 "presence_penalty", "frequency_penalty",
-                "response_format", "reasoning_effort"):
+                "response_format", "reasoning_effort", "parallel_tool_calls"):
         if key in body:
             chat[key] = body[key]
 
+    # 正式嵌套字段 → Chat 顶层等价物；显式顶层字段优先
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict) and "reasoning_effort" not in chat:
+        effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort.strip():
+            chat["reasoning_effort"] = effort
+    text = body.get("text")
+    if isinstance(text, dict) and "response_format" not in chat:
+        mapped = _text_format_to_response_format(text.get("format"))
+        if mapped is not None:
+            chat["response_format"] = mapped
     # max_output_tokens → max_tokens
     if "max_output_tokens" in body:
         chat["max_tokens"] = body["max_output_tokens"]
@@ -271,10 +306,11 @@ class ResponsesStreamConverter:
       yield converter.finish().encode()
     """
 
-    def __init__(self, model: str = "unknown"):
+    def __init__(self, model: str = "unknown", parallel_tool_calls: bool = True):
         self.resp_id = _rand_id("resp_")
         self.msg_id = _rand_id("msg_")
         self.model = model
+        self._parallel_tool_calls = bool(parallel_tool_calls)
         self.created_at = int(time.time())
 
         # 状态标记
@@ -291,7 +327,7 @@ class ResponsesStreamConverter:
         self._tool_calls: dict[int, dict] = {}  # index → {id, name, args, fc_id, output_idx, emitted}
         self._finish_reason: str | None = None
         self._usage: dict | None = None
-
+        self._seq = 0  # 事件序号：每个发出的事件递增
     # ---- 公开接口 ----
 
     def feed_line(self, line: str) -> str:
@@ -309,32 +345,36 @@ class ResponsesStreamConverter:
         return self._process_chunk(chunk)
 
     def finish(self) -> str:
-        """流结束后，发出收尾事件（done + completed）。"""
+        """流结束后，发出收尾事件（done + 终止状态）。"""
+        status, reason = self._final_status()
         events: list[str] = []
 
         # 关闭 reasoning item
         if self._emitted_reasoning_item:
             events.append(self._evt("response.reasoning_summary_text.done", {
-                "output_index": 0, "summary_index": 0, "text": self._reasoning
+                "output_index": 0, "summary_index": 0, "text": self._reasoning,
+                "item_id": self._reasoning_item_id
             }))
             events.append(self._evt("response.output_item.done", {
-                "output_index": 0, "item": self._reasoning_item("completed")
+                "output_index": 0, "item": self._reasoning_item(status)
             }))
 
         # 关闭 text content
         if self._emitted_content_part:
             events.append(self._evt("response.output_text.done", {
-                "output_index": self._msg_idx(), "content_index": 0, "text": self._content
+                "output_index": self._msg_idx(), "content_index": 0, "text": self._content,
+                "item_id": self.msg_id
             }))
             events.append(self._evt("response.content_part.done", {
                 "output_index": self._msg_idx(), "content_index": 0,
-                "part": {"type": "output_text", "text": self._content, "annotations": []}
+                "part": {"type": "output_text", "text": self._content, "annotations": []},
+                "item_id": self.msg_id
             }))
 
         if self._emitted_msg_item:
             events.append(self._evt("response.output_item.done", {
                 "output_index": self._msg_idx(),
-                "item": self._msg_item("completed")
+                "item": self._msg_item(status)
             }))
 
         # 关闭 function calls
@@ -343,22 +383,33 @@ class ResponsesStreamConverter:
             if tc.get("emitted"):
                 oi = tc["output_idx"]
                 events.append(self._evt("response.function_call_arguments.done", {
-                    "output_index": oi, "arguments": tc["args"]
+                    "output_index": oi, "arguments": tc["args"], "item_id": tc["fc_id"]
                 }))
                 events.append(self._evt("response.output_item.done", {
-                    "output_index": oi, "item": self._fc_item(tc, "completed")
+                    "output_index": oi, "item": self._fc_item(tc, status)
                 }))
 
-        # response.completed
-        events.append(self._evt("response.completed", {
-            "response": self._response_obj("completed")
+        # 终止事件：completed 或 incomplete（截断/过滤绝不伪装完成）
+        events.append(self._evt(f"response.{status}", {
+            "response": self._response_obj(status, incomplete_reason=reason)
         }))
         return "".join(events)
 
     def get_nonstream_response(self) -> dict:
         """流结束后获取完整的非流式 Response 对象。"""
-        return self._response_obj("completed")
+        status, reason = self._final_status()
+        return self._response_obj(status, incomplete_reason=reason)
 
+    def _final_status(self) -> tuple[str, str | None]:
+        """上游 finish_reason → (response status, incomplete reason)；截断/过滤不作 completed。"""
+        fr = self._finish_reason
+        if fr in (None, "stop", "tool_calls"):
+            return "completed", None
+        if fr == "length":
+            return "incomplete", "max_output_tokens"
+        if fr in ("content_filter", "content-filter", "refusal"):
+            return "incomplete", "content_filter"
+        return "incomplete", None
     # ---- 内部 ----
 
     def _process_chunk(self, chunk: dict) -> str:
@@ -395,7 +446,8 @@ class ResponsesStreamConverter:
                     self._emitted_reasoning_item = True
                 self._reasoning += reasoning
                 events.append(self._evt("response.reasoning_summary_text.delta", {
-                    "output_index": 0, "summary_index": 0, "delta": reasoning
+                    "output_index": 0, "summary_index": 0, "delta": reasoning,
+                    "item_id": self._reasoning_item_id
                 }))
 
             # 当前适配器只发 output_text；拒绝说明也保留为合法文本，不丢弃原文。
@@ -411,13 +463,15 @@ class ResponsesStreamConverter:
                 if not self._emitted_content_part:
                     events.append(self._evt("response.content_part.added", {
                         "output_index": self._msg_idx(), "content_index": 0,
-                        "part": {"type": "output_text", "text": "", "annotations": []}
+                        "part": {"type": "output_text", "text": "", "annotations": []},
+                        "item_id": self.msg_id
                     }))
                     self._emitted_content_part = True
 
                 self._content += content
                 events.append(self._evt("response.output_text.delta", {
-                    "output_index": self._msg_idx(), "content_index": 0, "delta": content
+                    "output_index": self._msg_idx(), "content_index": 0, "delta": content,
+                    "item_id": self.msg_id
                 }))
 
             # ---- tool_calls delta ----
@@ -457,7 +511,7 @@ class ResponsesStreamConverter:
                     slot["args"] += fn["arguments"]
                     events.append(self._evt("response.function_call_arguments.delta", {
                         "output_index": slot["output_idx"],
-                        "delta": fn["arguments"]
+                        "delta": fn["arguments"], "item_id": slot["fc_id"]
                     }))
 
             if finish:
@@ -466,8 +520,9 @@ class ResponsesStreamConverter:
         return "".join(events)
 
     def _evt(self, event_type: str, data: dict) -> str:
-        """格式化一个 SSE 事件。"""
-        payload = {"type": event_type, **data}
+        """格式化一个 SSE 事件；sequence_number 单调递增，供客户端校验事件顺序。"""
+        self._seq += 1
+        payload = {"type": event_type, **data, "sequence_number": self._seq}
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     def _msg_idx(self) -> int:
@@ -501,7 +556,7 @@ class ResponsesStreamConverter:
             "status": status,
         }
 
-    def _response_obj(self, status: str) -> dict:
+    def _response_obj(self, status: str, incomplete_reason: str | None = None) -> dict:
         output = []
         if self._emitted_reasoning_item:
             output.append(self._reasoning_item(status))
@@ -516,21 +571,29 @@ class ResponsesStreamConverter:
         if self._usage:
             u = self._usage
             reasoning_tokens = (u.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
+            # 缓存命中透传上游字段；两个键都缺失时省略 details，区分“未知”与“真正的 0”。
+            cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens",
+                                                                   u.get("cache_read_input_tokens"))
             usage = {
                 "input_tokens": u.get("prompt_tokens", u.get("input_tokens", 0)),
-                "input_tokens_details": {"cached_tokens": 0},
                 "output_tokens": u.get("completion_tokens", u.get("output_tokens", 0)),
                 "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
                 "total_tokens": u.get("total_tokens", 0),
             }
+            if isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0:
+                usage["input_tokens_details"] = {"cached_tokens": cached}
 
-        return {
+        obj = {
             "id": self.resp_id,
             "object": "response",
             "created_at": self.created_at,
             "status": status,
             "model": self.model,
             "output": output,
-            "parallel_tool_calls": True,
+            "parallel_tool_calls": self._parallel_tool_calls,
             "usage": usage,
         }
+        if status == "incomplete":
+            # 客户端据 incomplete_details 决定续写/重试；未知原因保留 null reason。
+            obj["incomplete_details"] = {"reason": incomplete_reason}
+        return obj

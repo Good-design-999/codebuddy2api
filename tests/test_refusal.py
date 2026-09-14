@@ -69,7 +69,9 @@ class AdapterRefusalTests(unittest.TestCase):
                         self.assertEqual(events(raw)[-1]["type"], "message_stop")
                     else:
                         final = events(raw)[-1]
-                        self.assertEqual(final["type"], "response.completed")
+                        # 拒绝/过滤是 incomplete：文字原文保留，但不得伪装成 completed
+                        expected_type = "response.completed" if finish == "stop" else "response.incomplete"
+                        self.assertEqual(final["type"], expected_type)
                         self.assertEqual(adapted_text(final["response"], False), REFUSAL)
                         self.assertEqual(final["response"]["output"][0]["content"], [
                             {"type": "output_text", "text": REFUSAL, "annotations": []}])
@@ -217,7 +219,11 @@ class EndpointRefusalTests(unittest.TestCase):
                                 self.assertIn("data: [DONE]", response.text)
                             else:
                                 self.assertEqual(delta_text(parsed, route == ROUTES[2]), REFUSAL)
-                                expected = "message_stop" if route == ROUTES[2] else "response.completed"
+                                if route == ROUTES[2]:
+                                    expected = "message_stop"
+                                else:
+                                    expected = ("response.completed" if finish == "stop"
+                                                else "response.incomplete")
                                 self.assertEqual(parsed[-1]["type"], expected)
 
     def test_empty_stop_done_errors_on_all_six_paths_without_normal_completion_or_replay(self):

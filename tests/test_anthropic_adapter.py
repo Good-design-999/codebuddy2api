@@ -182,10 +182,12 @@ def test_tool_result_with_user_text():
     chat = anthropic_request_to_chat(req)
     msgs = chat["messages"]
 
-    assert msgs[0]["role"] == "user"
-    assert msgs[0]["content"] == "Continue."
-    assert msgs[1]["role"] == "tool"
-    assert msgs[1]["tool_call_id"] == "toolu_xyz"
+    # 工具结果必须先于普通 user 文本，保持 assistant(tool_calls) → tool 的相邻关系
+    assert msgs[0]["role"] == "tool"
+    assert msgs[0]["tool_call_id"] == "toolu_xyz"
+    assert msgs[0]["content"] == "output here"
+    assert msgs[1]["role"] == "user"
+    assert msgs[1]["content"] == "Continue."
     print("✅ test_tool_result_with_user_text")
 
 
@@ -405,6 +407,50 @@ def test_empty_messages():
     assert chat["messages"][0]["role"] == "system"
     print("✅ test_empty_messages")
 
+def test_disable_parallel_tool_use_is_mapped():
+    """tool_choice.disable_parallel_tool_use 必须端到端传到上游，不接受后丢失。"""
+    base = {"model": "auto", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "t", "input_schema": {"type": "object"}}]}
+    chat = anthropic_request_to_chat({**base, "tool_choice": {"type": "auto",
+                                      "disable_parallel_tool_use": True}})
+    assert chat["tool_choice"] == "auto"
+    assert chat["parallel_tool_calls"] is False
+    chat = anthropic_request_to_chat({**base, "tool_choice": {"type": "auto",
+                                      "disable_parallel_tool_use": False}})
+    assert chat["parallel_tool_calls"] is True
+    chat = anthropic_request_to_chat({**base, "tool_choice": {"type": "auto"}})
+    assert "parallel_tool_calls" not in chat
+    print("✅ test_disable_parallel_tool_use_is_mapped")
+
+def test_stop_sequences_are_mapped():
+    """stop_sequences 映射为上游 stop；显式 stop 优先；错误类型显式拒绝。"""
+    base = {"model": "auto", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}]}
+    chat = anthropic_request_to_chat({**base, "stop_sequences": ["\n\n", "END"]})
+    assert chat["stop"] == ["\n\n", "END"]
+    chat = anthropic_request_to_chat({**base, "stop": ["X"], "stop_sequences": ["Y"]})
+    assert chat["stop"] == ["X"]
+    try:
+        anthropic_request_to_chat({**base, "stop_sequences": "END"})
+        raise AssertionError("non-array stop_sequences must raise")
+    except ValueError:
+        pass
+    print("✅ test_stop_sequences_are_mapped")
+
+def test_tool_result_is_error_is_preserved():
+    """is_error:true 与成功结果同正文时必须可区分：失败被编码进正文前缀。"""
+    def conv(is_error):
+        block = {"type": "tool_result", "tool_use_id": "toolu_1", "content": "exit 1"}
+        if is_error is not None:
+            block["is_error"] = is_error
+        req = {"model": "auto", "max_tokens": 64, "messages": [{"role": "user", "content": [block]}]}
+        return anthropic_request_to_chat(req)["messages"][0]["content"]
+    assert conv(True).startswith("[tool execution failed]\nexit 1")
+    assert conv(False) == "exit 1"
+    assert conv(None) == "exit 1"
+    print("✅ test_tool_result_is_error_is_preserved")
+
 
 if __name__ == "__main__":
     test_simple_text_request()
@@ -420,4 +466,7 @@ if __name__ == "__main__":
     test_nonstream_response()
     test_nonstream_response_tool_use()
     test_empty_messages()
-    print(f"\n🎉 All {13} tests passed!")
+    test_disable_parallel_tool_use_is_mapped()
+    test_stop_sequences_are_mapped()
+    test_tool_result_is_error_is_preserved()
+    print(f"\n🎉 All {16} tests passed!")

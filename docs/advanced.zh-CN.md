@@ -126,7 +126,10 @@ WebUI 可以直接上传文件；以下限制针对 `POST /admin/credentials` �
 - 图片计入全部历史和工具结果，重复图片逐次计数，按消息与内容块数组顺序判断新旧。默认保留最新 16 张，只移除超额图片并保留文本和消息结构；图片清空的内容用文本占位。
 - `--image-policy error` 在本地返回 `413 / too_many_images`。处理后仍超过字节上限则返回 `413 / request_too_large`，不为满足预算继续截断文本。
 - 图片数量合规不保证单图大小或模型视觉能力满足上游要求。URL/base64 图片可转换，Responses 图片 `file_id` 不支持。
-- 显式设置 `stream`：Chat 默认非流式，Responses / Messages 默认流式。Responses 流式以及带工具的 Chat / Messages 流式先聚合校验，再输出 SSE，并非所有路径都实时逐 token 转发。
+- 省略 `stream` 时三个端点都按协议默认返回完整 JSON（非流式）；`stream` 必须是布尔值。Responses 流式以及带工具的 Chat / Messages 流式先聚合校验，再输出 SSE，并非所有路径都实时逐 token 转发。
+- 推理端点的错误体按客户端协议成形：OpenAI 路由为顶层 `error` 对象，Messages 路由为 `{"type": "error", ...}`；状态码与 `Retry-After` 保持不变。
+- 不支持的能力显式拒绝而非静默降级：Chat 的 `n≠1`、Responses 的 `previous_response_id`/`conversation`（本网关不保存服务端响应状态）返回 400；长度截断或审核过滤的 Responses 标记为 `incomplete`，不伪装为 `completed`。
+- `/v1/messages/count_tokens` 返回字符启发式估算值，仅作预算参考，不是精确计数。
 - 兼容文本日志和 SQLite 审计使用独立预算；日志仅记录有界、脱敏预览，不是完整原始请求。日志、凭证导出和备份仍须按私有数据保管。
 
 ## 故障与重试

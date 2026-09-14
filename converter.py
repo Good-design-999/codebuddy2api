@@ -41,6 +41,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler as _default_http_exception_handler
 from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 
@@ -1300,7 +1301,7 @@ PASSTHROUGH_BODY_KEYS = {
     "max_tokens", "max_completion_tokens", "top_p", "stream",
     "stream_options", "stop", "presence_penalty", "frequency_penalty",
     "n", "response_format", "seed", "user", "reasoning_effort", "prompt_cache_key",
-    "verbosity", "reasoning_summary",
+    "verbosity", "reasoning_summary", "parallel_tool_calls",
 }
 
 # ---------------------------------------------------------------------------
@@ -1308,6 +1309,39 @@ PASSTHROUGH_BODY_KEYS = {
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="codebuddy2api", version=APP_VERSION)
+
+# Anthropic 错误类型映射：按 https://platform.claude.com/docs/en/api/errors 成形
+_ANTHROPIC_ERROR_TYPES = {
+    "auth_error": "authentication_error",
+    "rate_limit_error": "rate_limit_error",
+    "invalid_request_error": "invalid_request_error",
+    "not_found_error": "not_found_error",
+    "upstream_error": "api_error",
+}
+
+
+@app.exception_handler(HTTPException)
+async def _protocol_http_exception(request: Request, exc: HTTPException):
+    """推理端点（/v1/*）的错误体按客户端协议成形；/admin 与其他路由保持 FastAPI 默认 detail 包装。"""
+    path = request.url.path
+    if not path.startswith("/v1/"):
+        return await _default_http_exception_handler(request, exc)
+    detail = exc.detail
+    err = detail.get("error") if isinstance(detail, dict) else None
+    if not isinstance(err, dict):
+        err = {"message": str(detail), "type": "error"}
+    message = str(err.get("message") or "")
+    if path.startswith("/v1/messages"):
+        # Anthropic：{"type": "error", "error": {...}}；上游业务 code 原样保留，客户端仍可识别 content_filter
+        etype = _ANTHROPIC_ERROR_TYPES.get(str(err.get("type") or ""))
+        if etype is None:
+            etype = "api_error" if exc.status_code >= 500 else "invalid_request_error"
+        error_obj = {**err, "type": etype, "message": message}  # code/param/image_count 等结构化字段原样保留
+        return JSONResponse({"type": "error", "error": error_obj},
+                            status_code=exc.status_code, headers=exc.headers)
+    # OpenAI：顶层 error 对象，保留 param/code 等既有字段
+    body = {"error": {**err, "message": message}}
+    return JSONResponse(body, status_code=exc.status_code, headers=exc.headers)
 CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "admin_csrf": True,     # 管理 Origin/CSRF 校验，仅允许启动配置关闭
                 "models_remote": None,   # 国内站云端模型表（缓存或同步结果）
@@ -2039,6 +2073,16 @@ def current_model_details(region: str | None = None) -> list[dict]:
     return list(details.values())
 
 
+def _client_wants_stream(payload: dict) -> bool:
+    """stream 缺省为 False（OpenAI/Anthropic 协议默认非流式）；非布尔类型显式 400。
+    目标客户端（Codex CLI / Claude Code）均显式发送 stream:true，不受影响。"""
+    value = payload.get("stream", False)
+    if not isinstance(value, bool):
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": "stream must be a boolean", "type": "invalid_request_error", "param": "stream"}})
+    return value
+
+
 def _prepare_payload(payload, field="messages") -> dict:
     """先处理整次请求的图片，再进行适配、日志记录和凭证选取。"""
     if not isinstance(payload, dict):
@@ -2172,12 +2216,18 @@ async def chat_completions(request: Request,
         raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
 
     payload = _prepare_payload(payload)
+    # 聚合路径无法保持多候选独立：n 缺省或恰为 1，否则显式拒绝而非拼接答案
+    n_value = payload.get("n")
+    if n_value is not None and not (isinstance(n_value, int) and not isinstance(n_value, bool) and n_value == 1):
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": "only n=1 is supported: multiple candidates would be merged into one answer",
+            "type": "invalid_request_error", "param": "n"}})
     messages = payload.get("messages") or []
     if not messages:
         raise HTTPException(status_code=400, detail={"error": {"message": "messages is required", "type": "invalid_request_error"}})
 
     # 构造后端 body：只透传已知的合法字段
-    client_wants_stream = bool(payload.get("stream"))
+    client_wants_stream = _client_wants_stream(payload)
     body = {k: payload[k] for k in PASSTHROUGH_BODY_KEYS if k in payload}
     body = _prepare_chat_body(body)
 
@@ -2292,19 +2342,28 @@ def _tool_choice_satisfied(tool_calls, body):
     return bool(tool_calls) and all(call.get("function", {}).get("name") in names for call in tool_calls)
 
 
-def _tool_calls_healthy(tool_calls) -> bool:
-    """校验聚合后的 tool_calls：name 非空且 arguments 为合法 JSON。"""
+def _tool_calls_healthy(tool_calls, body: dict | None = None) -> bool:
+    """校验聚合后的 tool_calls：name 属于已声明工具，arguments 是含 JSON 对象的字符串。"""
     if not tool_calls:
         return True
+    names = {tool.get("function", {}).get("name") for tool in (body or {}).get("tools", [])
+             if isinstance(tool, dict) and isinstance(tool.get("function"), dict)} if body is not None else None
     for tc in tool_calls:
         if not isinstance(tc.get("id"), str) or not tc["id"].strip():
             return False
         fn = tc.get("function") or {}
-        if not (fn.get("name") or "").strip() or not (fn.get("arguments") or "").strip():
+        name = fn.get("name") or ""
+        if not name.strip() or not (fn.get("arguments") or "").strip():
+            return False
+        # 解析成功不等于正确：null/[]/42/"text" 都不是合法工具参数
+        # 名称核对只在请求确实声明了工具时进行；未声明工具的请求收到的工具调用交由客户端裁决
+        if names and name not in names:
             return False
         try:
-            json.loads(fn.get("arguments") or "")
+            arguments = json.loads(fn.get("arguments") or "")
         except Exception:
+            return False
+        if not isinstance(arguments, dict):
             return False
     return True
 
@@ -2324,9 +2383,13 @@ def _chat_result_to_sse_lines(m: dict) -> list[str]:
     tcs = m.get("tool_calls") or []
     finish = m.get("finish_reason") or "stop"
     model = m.get("model")
+    # 一次响应的所有 chunk 共享稳定的 completion 标识，严格客户端可按契约关联事件
+    completion_id = "chatcmpl-" + os.urandom(12).hex()
+    created = int(time.time())
 
     def _line(delta: dict, fr=None) -> str:
-        payload = {"choices": [{"index": 0, "delta": delta, "finish_reason": fr}]}
+        payload = {"id": completion_id, "object": "chat.completion.chunk", "created": created,
+                   "choices": [{"index": 0, "delta": delta, "finish_reason": fr}]}
         if model:
             payload["model"] = model
         return "data: " + json.dumps(payload, ensure_ascii=False)
@@ -2343,7 +2406,11 @@ def _chat_result_to_sse_lines(m: dict) -> list[str]:
         lines.append(_line({"tool_calls": [dict(tc, index=i)]}))
     lines.append(_line({}, finish))
     if m.get("usage"):
-        lines.append("data: " + json.dumps({"choices": [], "usage": m["usage"]}, ensure_ascii=False))
+        usage_chunk = {"id": completion_id, "object": "chat.completion.chunk", "created": created,
+                       "choices": [], "usage": m["usage"]}
+        if model:
+            usage_chunk["model"] = model
+        lines.append("data: " + json.dumps(usage_chunk, ensure_ascii=False))
     lines.append("data: [DONE]")
     return lines
 
@@ -2458,7 +2525,7 @@ async def _fetch_checked_chat(url, headers, body, model_name, rid, cred=None, *,
             _note_content_filter(rid, model_name, final=True)
 
         calls = result["choices"][0]["message"].get("tool_calls")
-        if _tool_calls_healthy(calls) and (detector.detected or _tool_choice_satisfied(calls, body)):
+        if _tool_calls_healthy(calls, body) and (detector.detected or _tool_choice_satisfied(calls, body)):
             observe_usage(result.get("usage") or {})
             return result
         # 审核拒绝不是工具损坏，不因 required 工具选择而重复生成。
@@ -2568,6 +2635,12 @@ async def create_response(request: Request,
         raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
 
     payload = _prepare_payload(payload, field="input")
+    # 本网关不保留服务端响应状态：依赖服务端补全历史的字段必须显式拒绝而非静默开新对话
+    for stateful in ("previous_response_id", "conversation"):
+        if payload.get(stateful):
+            raise HTTPException(status_code=400, detail={"error": {
+                "message": f"{stateful} is not supported: this gateway keeps no server-side response state; resubmit the full input instead",
+                "type": "invalid_request_error", "param": stateful}})
     # 转换请求：Responses → Chat
     try:
         chat_body = responses_request_to_chat(payload)
@@ -2578,7 +2651,7 @@ async def create_response(request: Request,
         chat_body, keep_tool_metadata=CONFIG.get("keep_tool_metadata", False))
     chat_body = _prepare_chat_body(chat_body)
 
-    client_wants_stream = payload.get("stream", True)  # Codex CLI 默认 stream
+    client_wants_stream = _client_wants_stream(payload)
     model_name = payload.get("model", "auto")
     rid = os.urandom(4).hex()
     _log(f"[{rid}] ▶ RESPONSES {model_name} | stream={client_wants_stream} | input_items={len(payload.get('input', []))}")
@@ -2608,7 +2681,7 @@ async def create_response(request: Request,
 
 
 async def _nonstream_adapted(url, headers, body, model_name, t0, rid, cred, *, anthropic=False):
-    converter = AnthropicStreamConverter(model=model_name) if anthropic else ResponsesStreamConverter(model=model_name)
+    converter = (AnthropicStreamConverter(model=model_name) if anthropic else ResponsesStreamConverter(model=model_name, parallel_tool_calls=body.get("parallel_tool_calls", True)))
     try:
         collected = await _fetch_checked_chat(url, headers, body, model_name, rid, cred, filter_retry=True)
         for line in _chat_result_to_sse_lines(_completion_to_merged(collected)):
@@ -2624,7 +2697,7 @@ async def _nonstream_adapted(url, headers, body, model_name, t0, rid, cred, *, a
 
 async def _stream_adapted(url, headers, body, model_name, t0, rid, cred=None, *, anthropic=False):
     """协议适配只处理事件映射，连接、聚合与错误边界共用。"""
-    converter = AnthropicStreamConverter(model=model_name) if anthropic else ResponsesStreamConverter(model=model_name)
+    converter = (AnthropicStreamConverter(model=model_name) if anthropic else ResponsesStreamConverter(model=model_name, parallel_tool_calls=body.get("parallel_tool_calls", True)))
     try:
         async for line in _chat_sse_lines(
                 url, headers, body, model_name, t0, rid, cred,
@@ -2691,7 +2764,7 @@ async def create_message(request: Request,
     _log_json(f"[{rid}] ANTHROPIC → CHAT BODY (预览)", chat_body)
     t0 = time.time()
 
-    if not payload.get("stream", True):
+    if not _client_wants_stream(payload):
         return await _nonstream_adapted(url, headers, chat_body, model_name, t0, rid, cred, anthropic=True)
 
     return StreamingResponse(
@@ -2711,13 +2784,38 @@ async def _stream_anthropic(url: str, headers: dict, body: dict,
 async def count_tokens(request: Request,
                        authorization: Optional[str] = Header(default=None),
                        x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
-    """Anthropic token 计数端点（stub）。
-
-    Claude Code 可能在发送消息前调用此端点。
-    返回一个简单估算值，不做实际 token 计数。
-    """
+    """Anthropic token 计数端点：字符启发式估算（Claude Code 发送前据此做预算）。"""
     _check_auth(authorization, x_api_key)
-    return {"input_tokens": 0}
+    try:
+        payload = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail={"error": {"message": "请求体必须是 JSON 对象", "type": "invalid_request_error"}})
+    return {"input_tokens": _estimate_input_tokens(payload)}
+
+
+def _estimate_input_tokens(payload: dict) -> int:
+    """启发式估算：ASCII 约 4 字符 1 token，其余字符（如中文）按 1 token 计，每条消息加结构开销。
+    只是预算参考，不是精确计数；客户端不得据此断言与上游计费一致。"""
+
+    def measure(value) -> int:
+        if isinstance(value, str):
+            ascii_chars = sum(1 for ch in value if ord(ch) < 128)
+            return (ascii_chars + 3) // 4 + (len(value) - ascii_chars)
+        if isinstance(value, list):
+            return sum(measure(item) for item in value)
+        if isinstance(value, dict):
+            return sum(measure(item) for item in value.values())
+        return 0
+
+    total = measure(payload.get("system")) + measure(payload.get("tools"))
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            if isinstance(message, dict):
+                total += measure(message.get("content")) + 4  # 消息结构开销
+    return total
 
 
 # ---------------------------------------------------------------------------
