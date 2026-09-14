@@ -76,6 +76,19 @@ class EndpointTests(unittest.TestCase):
         self.requests.append(request)
         return self.respond(request)
 
+    def test_stateful_responses_fields_are_rejected(self):
+        """previous_response_id/conversation 依赖服务端历史：本网关无状态，必须显式 400。"""
+        for field, value in (("previous_response_id", "resp_abc"), ("conversation", "conv_abc")):
+            with self.subTest(field=field):
+                self.requests.clear()
+                response = self.client.post("/v1/responses", json={
+                    "model": "auto", "input": [{"role": "user", "content": "hi"}], field: value})
+                self.assertEqual(response.status_code, 400, response.text)
+                body = response.json()
+                error = body.get("error") or body["detail"]["error"]
+                self.assertEqual(error["param"], field)
+                self.assertEqual(len(self.requests), 0)
+
     def test_tool_metadata_policy_reaches_all_protocols(self):
         description = "Read sandbox data without destructive changes."
         schema = {"type": "object", "title": "Lookup inputs", "properties": {

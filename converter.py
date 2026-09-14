@@ -2172,6 +2172,12 @@ async def chat_completions(request: Request,
         raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
 
     payload = _prepare_payload(payload)
+    # 聚合路径无法保持多候选独立：n 缺省或恰为 1，否则显式拒绝而非拼接答案
+    n_value = payload.get("n")
+    if n_value is not None and not (isinstance(n_value, int) and not isinstance(n_value, bool) and n_value == 1):
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": "only n=1 is supported: multiple candidates would be merged into one answer",
+            "type": "invalid_request_error", "param": "n"}})
     messages = payload.get("messages") or []
     if not messages:
         raise HTTPException(status_code=400, detail={"error": {"message": "messages is required", "type": "invalid_request_error"}})
@@ -2576,6 +2582,12 @@ async def create_response(request: Request,
         raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
 
     payload = _prepare_payload(payload, field="input")
+    # 本网关不保留服务端响应状态：依赖服务端补全历史的字段必须显式拒绝而非静默开新对话
+    for stateful in ("previous_response_id", "conversation"):
+        if payload.get(stateful):
+            raise HTTPException(status_code=400, detail={"error": {
+                "message": f"{stateful} is not supported: this gateway keeps no server-side response state; resubmit the full input instead",
+                "type": "invalid_request_error", "param": stateful}})
     # 转换请求：Responses → Chat
     try:
         chat_body = responses_request_to_chat(payload)
