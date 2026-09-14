@@ -597,6 +597,68 @@ def test_fetch_request_usage_marks_partial_at_page_cap():
     print("✅ test_fetch_request_usage_marks_partial_at_page_cap")
 
 
+def test_sync_usage_keeps_per_account_snapshots_on_failure():
+    """单账号同步失败：聚合保留其上次成功快照并标记 stale/partial，不再整体覆盖丢失。"""
+    import converter
+    with tempfile.TemporaryDirectory() as td:
+        paths = []
+        for uid in ("u1", "u2"):
+            p = Path(td) / f"{uid}.info"
+            p.write_text(json.dumps({
+                "auth": {"accessToken": f"token-{uid}", "refreshToken": "r",
+                         "domain": "https://www.codebuddy.cn",
+                         "expiresAt": int(time.time() * 1000) + 86400000,
+                         "lastRefreshTime": time.time() * 1000},
+                "account": {"uid": uid, "enterpriseId": "e"}}), encoding="utf-8")
+            paths.append(p)
+        pool = converter.CredentialPool(paths)
+        snapshots = {
+            "token-u1": {"by_day": {"2026-09-01": {"m": 10.0}}, "total_credits": 10.0, "requests": 1, "partial": False},
+            "token-u2": {"by_day": {"2026-09-02": {"m": 20.0}}, "total_credits": 20.0, "requests": 2, "partial": False},
+        }
+        failing = set()
+
+        def fake_fetch(token, uid="", domain=""):
+            if token in failing:
+                raise RuntimeError("synthetic sync failure")
+            return snapshots[token]
+
+        saved = (converter.CONFIG.get("usage_daily"), converter.CONFIG.get("usage_daily_accounts"),
+                 converter.CONFIG.get("control_store"))
+        orig_fetch = credits.fetch_request_usage
+        credits.fetch_request_usage = fake_fetch
+        converter.CONFIG.update(usage_daily=None, usage_daily_accounts=None, control_store=None)
+        try:
+            converter._sync_usage(pool)
+            view = converter.CONFIG["usage_daily"]
+            assert view["total_credits"] == 30.0 and view["requests"] == 3
+            assert view["partial"] is False and "stale_accounts" not in view
+
+            failing.add("token-u2")
+            converter._sync_usage(pool)
+            view = converter.CONFIG["usage_daily"]
+            assert view["total_credits"] == 30.0 and view["requests"] == 3  # u2 历史保留
+            assert view["partial"] is True and view["stale_accounts"] == ["u2.info"]
+
+            failing.clear()
+            snapshots["token-u2"] = {"by_day": {"2026-09-02": {"m": 25.0}},
+                                     "total_credits": 25.0, "requests": 4, "partial": False}
+            converter._sync_usage(pool)
+            view = converter.CONFIG["usage_daily"]
+            assert view["total_credits"] == 35.0 and view["partial"] is False  # 成功后自愈
+
+            paths[1].unlink()
+            pool.prune()
+            converter._sync_usage(pool)
+            view = converter.CONFIG["usage_daily"]
+            assert view["total_credits"] == 10.0  # 凭证删除后其快照不再计入
+        finally:
+            credits.fetch_request_usage = orig_fetch
+            converter.CONFIG["usage_daily"], converter.CONFIG["usage_daily_accounts"], \
+                converter.CONFIG["control_store"] = saved
+    print("✅ test_sync_usage_keeps_per_account_snapshots_on_failure")
+
+
 def test_fetch_request_usage_paging():
     """mock 分页明细：跨页聚合 credit，按 日期×模型 归并；请求天数夹到 30 天。"""
     pages = [
@@ -825,6 +887,7 @@ if __name__ == "__main__":
     test_aggregate_credits()
     test_fetch_request_usage_rejects_invalid_success_payloads()
     test_fetch_credits_distinguishes_empty_from_missing_structure()
+    test_sync_usage_keeps_per_account_snapshots_on_failure()
     test_fetch_credits_paginates_until_short_page()
     test_fetch_request_usage_marks_partial_at_page_cap()
     test_fetch_request_usage_paging()
