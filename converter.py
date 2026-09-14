@@ -2298,19 +2298,28 @@ def _tool_choice_satisfied(tool_calls, body):
     return bool(tool_calls) and all(call.get("function", {}).get("name") in names for call in tool_calls)
 
 
-def _tool_calls_healthy(tool_calls) -> bool:
-    """校验聚合后的 tool_calls：name 非空且 arguments 为合法 JSON。"""
+def _tool_calls_healthy(tool_calls, body: dict | None = None) -> bool:
+    """校验聚合后的 tool_calls：name 属于已声明工具，arguments 是含 JSON 对象的字符串。"""
     if not tool_calls:
         return True
+    names = {tool.get("function", {}).get("name") for tool in (body or {}).get("tools", [])
+             if isinstance(tool, dict) and isinstance(tool.get("function"), dict)} if body is not None else None
     for tc in tool_calls:
         if not isinstance(tc.get("id"), str) or not tc["id"].strip():
             return False
         fn = tc.get("function") or {}
-        if not (fn.get("name") or "").strip() or not (fn.get("arguments") or "").strip():
+        name = fn.get("name") or ""
+        if not name.strip() or not (fn.get("arguments") or "").strip():
+            return False
+        # 解析成功不等于正确：null/[]/42/"text" 都不是合法工具参数
+        # 名称核对只在请求确实声明了工具时进行；未声明工具的请求收到的工具调用交由客户端裁决
+        if names and name not in names:
             return False
         try:
-            json.loads(fn.get("arguments") or "")
+            arguments = json.loads(fn.get("arguments") or "")
         except Exception:
+            return False
+        if not isinstance(arguments, dict):
             return False
     return True
 
@@ -2472,7 +2481,7 @@ async def _fetch_checked_chat(url, headers, body, model_name, rid, cred=None, *,
             _note_content_filter(rid, model_name, final=True)
 
         calls = result["choices"][0]["message"].get("tool_calls")
-        if _tool_calls_healthy(calls) and (detector.detected or _tool_choice_satisfied(calls, body)):
+        if _tool_calls_healthy(calls, body) and (detector.detected or _tool_choice_satisfied(calls, body)):
             observe_usage(result.get("usage") or {})
             return result
         # 审核拒绝不是工具损坏，不因 required 工具选择而重复生成。

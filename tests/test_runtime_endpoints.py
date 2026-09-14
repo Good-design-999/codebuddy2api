@@ -107,6 +107,23 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(len(self.requests), 1)
 
+    def test_tool_arguments_must_be_objects_of_declared_tools(self):
+        """解析成功不等于正确：非对象参数或未声明的函数名都不健康。"""
+        body = {"tools": TOOLS}
+        call = lambda name, args: [{"id": "c1", "function": {"name": name, "arguments": args}}]
+        healthy = converter._tool_calls_healthy
+        self.assertTrue(healthy(None, body))
+        self.assertTrue(healthy(call("synthetic_tool", "{}"), body))
+        self.assertTrue(healthy(call("synthetic_tool", "{\"x\": 1}"), body))
+        for bad_args in ("null", "[]", "42", "\"text\"", "{"):
+            with self.subTest(args=bad_args):
+                self.assertFalse(healthy(call("synthetic_tool", bad_args), body))
+        self.assertFalse(healthy(call("undeclared", "{}"), body))
+        self.assertFalse(healthy(call("", "{}"), body))
+        # 未声明任何工具的请求不做名称核对：合法 JSON 对象的工具调用仍算健康
+        self.assertTrue(healthy(call("anything", "{}"), {"tools": []}))
+        self.assertTrue(healthy(call("anything", "{}"), None))
+
     def test_tool_metadata_policy_reaches_all_protocols(self):
         description = "Read sandbox data without destructive changes."
         schema = {"type": "object", "title": "Lookup inputs", "properties": {
