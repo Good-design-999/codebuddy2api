@@ -1773,6 +1773,8 @@ def _billing_totals() -> dict:
             "soonest_expiry": agg.get("soonest_expiry"),
             "price_cny": price_cny, "price_usd": price_usd, "rate": rate,
             "used_source": "official_usage_detail" if detail else "quota_delta",
+            # 任一端数据不完整（积分分页到顶 / 用量到顶 / 账号同步失败）时对外可见
+            "partial": bool(agg.get("partial") or cache.get("partial")),
             "groups": groups_out, "by_day": cache.get("by_day") or {}}
 
 

@@ -565,6 +565,38 @@ def test_fetch_credits_distinguishes_empty_from_missing_structure():
     print("✅ test_fetch_credits_distinguishes_empty_from_missing_structure")
 
 
+def test_fetch_credits_paginates_until_short_page():
+    """积分包超过一页时翻页累加；不足一页停止；达到页数上限标记 partial。"""
+    token = _jwt("https://www.codebuddy.cn/x")
+    account = lambda i: {"PackageName": f"p{i}", "PackageCode": f"c{i}",
+                         "SlicePeriodUsageDetails": [{"SlicePeriodCapacityRemainPrecise": "1",
+                                                      "DeductionEndTime": None}]}
+    full_page = {"code": 0, "data": {"Response": {"Data": {"Accounts": [account(i) for i in range(100)]}}}}
+    short_page = {"code": 0, "data": {"Response": {"Data": {"Accounts": [account(1000)]}}}}
+    seen = []
+    result = _with_client(_fake_client([full_page, short_page], seen), lambda: credits.fetch_credits(token))
+    assert seen == [1, 2] and result["count"] == 101 and result["credits"] == 101.0
+    assert result["partial"] is False
+
+    seen = []
+    result = _with_client(_fake_client([full_page] * credits.CREDITS_MAX_PAGES, seen),
+                          lambda: credits.fetch_credits(token))
+    assert len(seen) == credits.CREDITS_MAX_PAGES
+    assert result["partial"] is True
+    print("✅ test_fetch_credits_paginates_until_short_page")
+
+
+def test_fetch_request_usage_marks_partial_at_page_cap():
+    """用量明细达到页数上限且 total 更大时必须标记 partial。"""
+    token = _jwt("https://www.codebuddy.cn/x")
+    big_total = credits.USAGE_MAX_PAGES * credits.USAGE_PAGE_SIZE + 1
+    row = {"requestTime": "2026-09-01 10:00:00", "model": "m", "credit": 0.01}
+    page = {"code": 0, "data": {"total": big_total, "data": [row]}}
+    result = _with_client(_fake_client([page]), lambda: credits.fetch_request_usage(token))
+    assert result["partial"] is True and result["requests"] == credits.USAGE_MAX_PAGES
+    print("✅ test_fetch_request_usage_marks_partial_at_page_cap")
+
+
 def test_fetch_request_usage_paging():
     """mock 分页明细：跨页聚合 credit，按 日期×模型 归并；请求天数夹到 30 天。"""
     pages = [
@@ -600,7 +632,7 @@ def test_fetch_request_usage_paging():
     finally:
         credits.httpx.Client = orig
     assert seen["pages"] == [1, 2], seen       # 按 total 停止分页
-    assert u["requests"] == 3 and abs(u["total_credits"] - 0.75) < 1e-9
+    assert u["requests"] == 3 and abs(u["total_credits"] - 0.75) < 1e-9 and u["partial"] is False
     assert u["by_day"]["2026-09-01"]["glm-5.3"] == 0.75
     assert "hy4-preview" in u["by_day"]["2026-09-02"]  # 免费模型 0 credit 也计入请求数
     import time as _t
@@ -793,6 +825,8 @@ if __name__ == "__main__":
     test_aggregate_credits()
     test_fetch_request_usage_rejects_invalid_success_payloads()
     test_fetch_credits_distinguishes_empty_from_missing_structure()
+    test_fetch_credits_paginates_until_short_page()
+    test_fetch_request_usage_marks_partial_at_page_cap()
     test_fetch_request_usage_paging()
     test_billing_balance_identity()
     test_billing_intl_split()
