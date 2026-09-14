@@ -124,6 +124,25 @@ class EndpointTests(unittest.TestCase):
         self.assertTrue(healthy(call("anything", "{}"), {"tools": []}))
         self.assertTrue(healthy(call("anything", "{}"), None))
 
+    def test_count_tokens_estimates_instead_of_constant_zero(self):
+        """计数端点返回随输入增长的估算值，而不是伪装精确的常量 0。"""
+        short = self.client.post("/v1/messages/count_tokens", json={
+            "model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(short.status_code, 200, short.text)
+        small = short.json()["input_tokens"]
+        self.assertGreater(small, 0)
+        long = self.client.post("/v1/messages/count_tokens", json={
+            "model": "auto", "system": "s" * 400,
+            "messages": [{"role": "user", "content": "x" * 4000}]})
+        big = long.json()["input_tokens"]
+        self.assertGreater(big, small)
+        cjk = self.client.post("/v1/messages/count_tokens", json={
+            "model": "auto", "messages": [{"role": "user", "content": "汉" * 100}]})
+        self.assertGreaterEqual(cjk.json()["input_tokens"], 100)  # 非 ASCII 不按 4 字符折算低估
+        bad = self.client.post("/v1/messages/count_tokens", content=b"{ not json",
+                               headers={"Content-Type": "application/json"})
+        self.assertEqual(bad.status_code, 400)
+
     def test_tool_metadata_policy_reaches_all_protocols(self):
         description = "Read sandbox data without destructive changes."
         schema = {"type": "object", "title": "Lookup inputs", "properties": {

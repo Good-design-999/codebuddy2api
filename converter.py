@@ -2740,13 +2740,38 @@ async def _stream_anthropic(url: str, headers: dict, body: dict,
 async def count_tokens(request: Request,
                        authorization: Optional[str] = Header(default=None),
                        x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
-    """Anthropic token 计数端点（stub）。
-
-    Claude Code 可能在发送消息前调用此端点。
-    返回一个简单估算值，不做实际 token 计数。
-    """
+    """Anthropic token 计数端点：字符启发式估算（Claude Code 发送前据此做预算）。"""
     _check_auth(authorization, x_api_key)
-    return {"input_tokens": 0}
+    try:
+        payload = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail={"error": {"message": "请求体必须是 JSON 对象", "type": "invalid_request_error"}})
+    return {"input_tokens": _estimate_input_tokens(payload)}
+
+
+def _estimate_input_tokens(payload: dict) -> int:
+    """启发式估算：ASCII 约 4 字符 1 token，其余字符（如中文）按 1 token 计，每条消息加结构开销。
+    只是预算参考，不是精确计数；客户端不得据此断言与上游计费一致。"""
+
+    def measure(value) -> int:
+        if isinstance(value, str):
+            ascii_chars = sum(1 for ch in value if ord(ch) < 128)
+            return (ascii_chars + 3) // 4 + (len(value) - ascii_chars)
+        if isinstance(value, list):
+            return sum(measure(item) for item in value)
+        if isinstance(value, dict):
+            return sum(measure(item) for item in value.values())
+        return 0
+
+    total = measure(payload.get("system")) + measure(payload.get("tools"))
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            if isinstance(message, dict):
+                total += measure(message.get("content")) + 4  # 消息结构开销
+    return total
 
 
 # ---------------------------------------------------------------------------
