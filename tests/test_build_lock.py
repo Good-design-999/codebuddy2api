@@ -5,6 +5,7 @@ import re
 import shlex
 import unittest
 
+import yaml
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
@@ -59,6 +60,15 @@ class BuildLockTests(unittest.TestCase):
                 stages.add(parts[parts.index("AS") + 1])
         self.assertTrue(any(image.startswith("node:") for image in external))
         self.assertTrue(any(image.startswith("python:") for image in external))
+
+    def test_ci_workflow_parses_and_keeps_install_flags_in_the_run_string(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+        for job in ("test", "web"):
+            install = next(step["run"] for step in workflow["jobs"][job]["steps"]
+                           if "-r requirements.txt" in step.get("run", ""))
+            self.assertEqual(shlex.split(install), ["python", "-m", "pip", "install",
+                             "--require-hashes", "--only-binary=:all:", "-r", "requirements.txt"])
+
 
     def test_ci_and_container_installs_require_verified_wheels(self):
         installs = []

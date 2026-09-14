@@ -36,7 +36,7 @@ jobs:
         id: version
         run: python scripts/check_version.py
       - name: Install test dependencies
-        run: python -m pip install --require-hashes --only-binary=:all: -r requirements.txt
+        run: 'python -m pip install --require-hashes --only-binary=:all: -r requirements.txt'
       - name: Run regression tests
         run: |
           for script in tests/test_*.py; do
@@ -74,7 +74,7 @@ jobs:
           echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/codebuddy-browser" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/vp/vp" env off
       - name: Install backend fixture dependencies
-        run: python -m pip install --require-hashes --only-binary=:all: -r requirements.txt
+        run: 'python -m pip install --require-hashes --only-binary=:all: -r requirements.txt'
       - name: Check and build WebUI
         working-directory: web
         run: |
