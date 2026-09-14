@@ -107,17 +107,15 @@ The WebUI supports direct uploads; these rules concern path imports through `POS
 
 Select client models from the WebUI or `GET /v1/models`. Catalogs are cached by account/tenant, region, product and client version in `auth/model-catalog.json`, with a default 6-hour TTL. New credentials trigger synchronization; failures retain only the same account's trusted cache. Legacy unscoped catalogs cannot authorize other accounts.
 
-Each `/v3/config` refresh keeps two scopes per account: the agent **picker** subset
-(`data.agents[cli].models`, what the official client lists) and the account **root** table
-(`data.models`). Routing and `GET /v1/models` use *picker ∪ root*, because the picker only says
-what the client displays, not what the backend serves: measured on 2026-09-14 a domestic account
-exposed 30 root models but only 16 picker entries, and the 14 tool-capable omitted names
-(`hy4-preview`, `deepseek-v3-2-volc`, `glm-4.6`, …) all answered `200`. The root table stays
-account-scoped, so a name the account cannot serve — `deepseek-v3-2-volc` on international
-accounts answers `400` — is neither advertised nor borrowed by another account. Models without
-tool support (image/video tiers) are filtered out of both views. Only the picker scope survives
-as `models` in `auth/model-catalog.json`; the root table is cached alongside it as `serves`, and
-entries written by earlier versions simply fall back to the picker subset.
+Each `/v3/config` refresh caches the agent picker subset as `models` and the account root table
+as `serves`. Routing and `GET /v1/models` merge these candidates, with picker metadata winning
+for duplicate IDs. Both scopes retain `disabled` and `availableModels` filtering; models without
+tool support are excluded.
+
+The root table is not a guarantee that a backend serves every listed model; measured `11102`
+avoidance still applies. Unknown account catalogs do not authorize dispatch and must not trigger
+a premature all-backends-unsupported 404; they retain the retryable readiness state.
+Legacy cache entries without `serves` use the picker until the next refresh.
 
 Beyond standard model fields, `credits` is the lowest source multiplier: `0.0` identifies a zero-multiplier source and `null` means no parseable multiplier was declared. `credits_by_profile` provides source details, such as `{"intl-work":0.0,"cn-cli":0.03}`. Compatible clients may ignore these fields; multipliers are not guaranteed to stay unchanged.
 

@@ -1209,7 +1209,7 @@ def _sync_model_catalogs(pool, ledger, refs, failed):
                         current["catalog_dirty"] = False
             if pool.apply_if_current(entry["cm"], generation, publish):
                 _log(f"[models] {profile} 模型表已刷新: 选择器 {len(models)} 个，"
-                     f"账号可服务 {len(serves)} 个")
+                     f"账号根表 {len(serves)} 个")
             else:
                 failed.add(entry["id"])
         except Exception as error:
@@ -1410,7 +1410,7 @@ CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "model_cache": None,     # ModelCatalogCache：按站点分组持久化，TTL 内不打云端
                 "model_catalogs": {},   # 仅供展示的产品合并目录（选择器子集）
                 "account_catalogs": None,  # 生产按账号指纹绑定；None 仅兼容无持久缓存的嵌入模式
-                                           # 每项含 models（选择器子集）与 serves（∪ 账号根表，判资格用）
+                                           # 每项含 models（选择器子集）与 serves（账号根表候选）
                 "auto_trial": False, "trial_ledger": None,
                 "model_guard": True,     # 表外模型本地拦截，不转发上游
                 "max_images": 16, "image_policy": "truncate",
@@ -1967,14 +1967,7 @@ def _usable_models(models):
 
 
 def _account_scope(account: dict, scope: str = "models") -> list[dict] | None:
-    """取账号目录的某个作用域：models = 选择器子集，serves = 子集 ∪ 账号根表。
-
-    serves 用于「这个账号能不能发这个模型」。官方 /v3/config 里 agents[cli].models 只是
-    客户端选择器要展示的那批名字，比同一份响应里 data.models 的账号根表小很多（实测
-    2026-09-14：国内账号根表 30 项 / 子集 16 项，被裁掉的 hy4-preview、
-    deepseek-v3-2-volc、glm-4.6 直接请求都回 200）。拿子集当能力表会把这些真实可用的模型
-    误判成 model_not_found。旧缓存没有根表时退回子集，行为与升级前一致。
-    """
+    """models 取选择器；serves 合并根表候选，同名保留选择器元数据。"""
     picker = account.get("models")
     if scope == "models" or picker is None:
         return picker

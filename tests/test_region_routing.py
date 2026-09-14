@@ -388,11 +388,7 @@ class RegionRoutingTests(unittest.TestCase):
                     self.post_ok("chat/completions", self.payload(), expected)
 
     def test_account_root_models_route_when_the_picker_subset_omits_them(self):
-        """回归 2026-09-14：agents[cli].models 是客户端选择器，不是账号能力表。
-
-        官方国内账号根表 30 项、选择器只剩 16 项，被裁掉的 hy4-preview 等 15 个模型直接
-        请求仍然回 200；只看子集判资格会让它们在本地变成 model_not_found。
-        """
+        """选择器省略的账号根表候选仍可经原模型名进入三协议路由。"""
         tables = catalogs()
         self.configure(tables=tables)
         for profile in PROFILES:

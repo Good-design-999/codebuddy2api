@@ -356,12 +356,7 @@ def fetch_credits(access_token: str, uid: str = "", domain: str = "") -> dict:
 
 
 def select_product_models(data: dict, product: str = "cli", *, scope: str = "picker") -> list[dict]:
-    """按产品对话 agent 解析模型；未声明名单兼容根表，显式空可用表不兜底。
-
-    scope="picker" 给出该 agent 声明的名字，也就是官方客户端模型选择器展示的那一批；
-    scope="account" 跳过 agent 裁剪，给出该账号 token 能取到的全量根表。子集说的是
-    「客户端要展示什么」，不是「后端能服务什么」，拿它当能力表会把真实可用的模型判成不存在。
-    """
+    """按产品解析选择器或账号根表候选，保留禁用与 availableModels 筛选。"""
     if product not in ("cli", "workbuddy"):
         raise ValueError("未知模型目录产品")
     if scope not in ("picker", "account"):
@@ -453,13 +448,7 @@ def select_cli_models(data: dict) -> list[dict]:
 
 def fetch_model_scopes(access_token: str, user_agent: str = "", *, domain: str = "",
                        uid: str = "", enterprise_id: str = "") -> dict[str, list[dict]]:
-    """按凭据产品一次拉取 /v3/config，返回 {"picker":…,"account":…} 两个作用域。
-
-    picker 是 agent 声明的选择器子集，account 是同一份响应里的账号根表。实测差距很大：
-    2026-09-14 国内账号根表 30 个、agents[cli] 只剩 16 个，被裁掉的 hy4-preview、
-    deepseek-v3-2-volc、glm-4.6 直接请求都回 200；而国际账号根表里没有
-    deepseek-v3-2-volc，后端也确实回 400 —— 根表既不多放也不误杀。
-    """
+    """一次请求解析选择器与账号根表；候选模型是否可服务仍需上游确认。"""
     auth = {"accessToken": access_token, "domain": domain}
     profile = profile_for_auth(auth)
     headers = catalog_headers(auth, {"uid": uid, "enterpriseId": enterprise_id}, user_agent=user_agent)
@@ -824,6 +813,6 @@ class ModelCatalogCache:
             self._save()
 
     def serves(self, group: str) -> list[dict]:
-        """该组账号可服务的全量根表；升级前写的缓存没有这一层，返回空由调用方回退子集。"""
+        """返回账号根表候选；旧缓存无此字段时返回空，由调用方回退选择器。"""
         with self._lock:
             return deepcopy((self._data["groups"].get(group) or {}).get("serves") or [])

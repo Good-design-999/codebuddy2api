@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""模型目录的两个作用域：选择器子集用于展示，账号根表用于资格判定。
-
-回归 2026-09-14：官方账号级 /v3/config 的 agents[cli].models 比 data.models 少一半
-（国内账号 30 项根表只剩 16 项选择器），而网关拿子集当能力表，于是仍在服务的
-hy4-preview、deepseek-v3-2-volc、glm-4.6 全部被本地判成 model_not_found。
-
-运行：.venv/bin/python -B tests/test_catalog_scope.py
-"""
+"""账号候选目录、选择器兼容性、缓存隔离与倍率的离线回归。"""
 import sys
 from pathlib import Path
 
