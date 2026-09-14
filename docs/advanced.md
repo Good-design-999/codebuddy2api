@@ -137,6 +137,7 @@ Credential domain / token issuer determine the product identity. Chat and refres
 | Local 401 | Client key differs from the gateway key |
 | Upstream 401 / 403 | Credential-level authentication circuit opens; inspect and log in again in the WebUI |
 | 429 | Cool down that upstream model on the credential; later requests may rebind, but the current request is not replayed. All candidates cooling down still returns 429 |
+| Upstream `service info not found` (code 11102) | That backend does not serve the model at all: avoid it for the `(backend, model)` pair, route the model to another backend, and return 404 when none has it. Half-open after 6 h, exponential backoff up to 24 h, cleared at once by one successful call; inspect via `GET /admin/model-blocks` |
 | Connection setup failure | Retry only `ConnectError` / `ConnectTimeout` once after backoff |
 | Post-send disconnect, read/write timeout or HTTP error | No network replay, avoiding duplicate billing; logs include exception type and elapsed time |
 | Malformed tool calls | Aggregate validation permits up to 3 additional generations, potentially consuming credits; exhaustion returns an error |
