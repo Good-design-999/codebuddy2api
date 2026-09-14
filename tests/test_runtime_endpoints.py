@@ -602,6 +602,14 @@ class ConfigurationTests(unittest.TestCase):
                                            "max_request_bytes": 33554432, "log_body_limit": 65536,
                                            "admin_csrf": True, "keep_tool_metadata": False})
 
+    def test_open_binding_without_key_requires_explicit_opt_in(self):
+        # 非回环 + 空 key：默认拒启（SystemExit 2）
+        self.configure(flags=("--host", "0.0.0.0"), invalid=True)
+        # 显式放行环境变量后可启动
+        self.configure(env={"CODEBUDDY2API_ALLOW_OPEN_NOAUTH": "true"}, flags=("--host", "0.0.0.0"))
+        # 非回环但设了 key：正常
+        self.configure(env={"CODEBUDDY2API_KEY": "k"}, flags=("--host", "0.0.0.0"))
+
     def test_environment_and_explicit_cli_precedence(self):
         env = {"CODEBUDDY2API_MAX_IMAGES": "8", "CODEBUDDY2API_IMAGE_POLICY": "error",
                "CODEBUDDY2API_MAX_REQUEST_BYTES": "100000", "CODEBUDDY2API_LOG_BODY_LIMIT": "0"}
