@@ -139,7 +139,7 @@ WebUI 可以直接上传文件；以下限制针对 `POST /admin/credentials` �
 ## 部署暴露与凭据导入
 
 - Compose 端口映射默认只绑回环（`CODEBUDDY2API_BIND` 默认 127.0.0.1）；原生运行绑定非回环地址且未设 API key 时拒绝启动，须显式设 `CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true`。
-- 配置 key 时，`/v1/*` 在缓冲请求体、预留推理名额之前校验请求头；即使名额已满，无效 key 仍返回 401。
+- 配置 key 时，生成及 token 估算 POST 在缓冲请求体、预留推理名额之前校验请求头；即使名额已满，无效 key 仍返回 401。其他路由保留原有鉴权和路由行为。
 - 凭据导入/上传在落盘前把 token 别名归一化为官方字段名；严格 JSON 解析拒绝 NaN/Infinity，`expiresAt`/`lastRefreshTime` 必须是合理的有限毫秒时间戳。
 
 ## 账务数据完整性

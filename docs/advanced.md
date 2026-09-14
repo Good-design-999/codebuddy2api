@@ -139,7 +139,7 @@ Credential domain / token issuer determine the product identity. Chat and refres
 ## Deployment exposure and credential intake
 
 - The compose port mapping binds loopback by default (`CODEBUDDY2API_BIND` defaults to 127.0.0.1); a native run bound to a non-loopback host with an empty API key refuses to start unless `CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true` is set explicitly.
-- When a key is configured, `/v1/*` verifies request headers before buffering bodies or reserving inference capacity; invalid keys return 401 even while generation slots are full.
+- When a key is configured, generation and token-count POSTs verify request headers before buffering bodies or reserving inference capacity; invalid keys return 401 even while generation slots are full. Other routes retain their existing authentication and routing behavior.
 - Credential imports/uploads persist the normalized form (token aliases folded into the canonical fields); strict JSON parsing rejects NaN/Infinity, and `expiresAt`/`lastRefreshTime` must be plausible finite millisecond timestamps.
 
 ## Billing data integrity

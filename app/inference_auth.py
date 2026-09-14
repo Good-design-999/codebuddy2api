@@ -6,6 +6,10 @@ from fastapi import HTTPException
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 
+from .inbound_limits import _GATED_PATHS
+
+_BODY_PATHS = (*_GATED_PATHS, "/v1/messages/count_tokens")
+
 
 def require_api_key(key, authorization=None, x_api_key=None):
     """Preserve Bearer precedence, X-Api-Key fallback, and optional empty keys."""
@@ -26,7 +30,8 @@ class InferenceAuthMiddleware:
         self.config = config
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or not scope.get("path", "").startswith("/v1/"):
+        if (scope["type"] != "http" or scope.get("method") != "POST"
+                or scope.get("path", "") not in _BODY_PATHS):
             return await self.app(scope, receive, send)
         headers = Headers(scope=scope)
         try:

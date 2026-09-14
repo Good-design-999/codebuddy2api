@@ -39,7 +39,7 @@ class InferenceAdmissionTests(unittest.IsolatedAsyncioTestCase):
             layer = layer.app
         self.gate = layer
 
-    async def request(self, path, headers=(), *, forbid_receive=False):
+    async def request(self, path, headers=(), *, forbid_receive=False, method="POST"):
         sent = []
         replayed = False
 
@@ -55,14 +55,16 @@ class InferenceAdmissionTests(unittest.IsolatedAsyncioTestCase):
         async def send(message):
             sent.append(message)
 
-        scope = {"type": "http", "method": "POST", "path": path, "raw_path": path.encode(),
+        scope = {"type": "http", "method": method, "path": path, "raw_path": path.encode(),
                  "query_string": b"", "headers": list(headers), "scheme": "http", "http_version": "1.1",
                  "server": ("test", 80), "client": ("127.0.0.1", 1234),
                  "asgi": {"version": "3.0", "spec_version": "2.3"}}
         await asyncio.wait_for(self.app(scope, receive, send), 2)
         start = next(message for message in sent if message["type"] == "http.response.start")
         body = b"".join(message.get("body", b"") for message in sent)
-        return start["status"], json.loads(body)
+        content_type = dict(start.get("headers", [])).get(b"content-type", b"")
+        payload = json.loads(body) if b"application/json" in content_type else body.decode()
+        return start["status"], payload
 
     def assert_unauthorized(self, path, status, body):
         self.assertEqual(status, 401, body)
@@ -119,6 +121,16 @@ class InferenceAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assert_unauthorized(ROUTES[0], status, body)
         status, body = await self.request(ROUTES[0], ((b"x-api-key", b"replacement-key"),))
         self.assertEqual(status, 200, body)
+
+    async def test_unknown_routes_and_methods_preserve_routing_errors(self):
+        for path, method, expected in (("/v1/missing", "GET", 404),
+                                       ("/v1/missing", "POST", 404),
+                                       ("/v1/messages/unknown", "POST", 404),
+                                       ("/v1/messages", "GET", 405)):
+            with self.subTest(path=path, method=method):
+                status, body = await self.request(path, method=method)
+                self.assertEqual(status, expected, body)
+
 
     async def test_disabled_gate_still_authenticates_and_empty_key_remains_optional(self):
         self.config["max_concurrent"] = 0
