@@ -239,6 +239,16 @@ class EndpointTests(unittest.TestCase):
             finally:
                 converter.CONFIG["tool_call_max_retry"] = 3
 
+    def test_credential_selection_runs_off_the_event_loop(self):
+        """_route_chat 内含线程锁/文件锁/同步刷新：三个端点都必须经线程池调用它。"""
+        import inspect
+        import re
+        src = inspect.getsource(converter)
+        direct = re.findall(r"^\s+(?:body|chat_body), cred, headers, url = _route_chat\(", src, re.M)
+        pooled = re.findall(r"await run_in_threadpool\(_route_chat", src)
+        self.assertEqual(direct, [])
+        self.assertEqual(len(pooled), 3)
+
     def test_tool_metadata_policy_reaches_all_protocols(self):
         description = "Read sandbox data without destructive changes."
         schema = {"type": "object", "title": "Lookup inputs", "properties": {

@@ -43,6 +43,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler as _default_http_exception_handler
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 import uvicorn
 
 try:
@@ -2307,7 +2308,8 @@ async def chat_completions(request: Request,
     _log(f"[{rid}] ▶ REQUEST {model_name} | stream={client_wants_stream} | msgs={len(messages)}"
          + (f" | tools={tool_names}" if tool_names else "")
          + (f" | last_user={_truncate(last_user, 60)!r}" if last_user else ""))
-    body, cred, headers, url = _route_chat(payload, body, rid)
+    # 凭据选择/到期刷新持线程锁与文件锁并可能同步访问网络：放到受限线程池，不占事件循环
+    body, cred, headers, url = await run_in_threadpool(_route_chat, payload, body, rid)
     _log_json(f"[{rid}] REQUEST BODY (发往后端，预览)", body)
     t0 = time.time()
 
@@ -2742,7 +2744,8 @@ async def create_response(request: Request,
         f"| dropped_harness={projection_stats.get('dropped_harness_messages', 0)} "
         f"| anchor_user={projection_stats.get('anchor_user_preserved', False)}"
     )
-    chat_body, cred, headers, url = _route_chat(payload, chat_body, rid)
+    # 同上：凭据选择/刷新是阻塞操作，移出事件循环
+    chat_body, cred, headers, url = await run_in_threadpool(_route_chat, payload, chat_body, rid)
     _log_json(f"[{rid}] RESPONSES → CHAT BODY (预览)", chat_body)
     t0 = time.time()
 
@@ -2836,7 +2839,8 @@ async def create_message(request: Request,
     chat_messages = chat_body.get("messages", [])
     rid = os.urandom(4).hex()
     _log(f"[{rid}] ▶ ANTHROPIC {model_name} | msgs={len(chat_messages)} | anthropic_msgs={len(messages)}")
-    chat_body, cred, headers, url = _route_chat(payload, chat_body, rid)
+    # 同上：凭据选择/刷新是阻塞操作，移出事件循环
+    chat_body, cred, headers, url = await run_in_threadpool(_route_chat, payload, chat_body, rid)
     _log_json(f"[{rid}] ANTHROPIC → CHAT BODY (预览)", chat_body)
     t0 = time.time()
 
