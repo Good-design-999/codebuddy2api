@@ -1633,6 +1633,8 @@ async def admin_add_credential(request: Request,
         if (not isinstance(cred_data.get("account") or {}, dict)
                 or not isinstance(cred_data["auth"].get("expiresAt", 0), (int, float))):
             raise CredentialFileError("凭据账号或过期时间格式无效")
+        # 与上传路径一致：落盘前折叠 token 别名为官方字段名
+        content = json.dumps(auth_oauth.normalize_cred_data(cred_data), ensure_ascii=False).encode("utf-8")
     except CredentialFileError:
         raise HTTPException(status_code=400, detail={"error": {"message": "凭据文件不符合导入要求", "type": "invalid_request_error"}}) from None
     except (ValueError, UnicodeError, RecursionError):

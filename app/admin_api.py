@@ -343,6 +343,9 @@ def install_admin(app, config, gateway):
                     if not body.get("replace", False) and (directory / name).exists():
                         results.append({"name": name, "ok": False, "error": "文件已存在，需明确允许替换"})
                         continue
+                    # 落盘统一为规范形态：token 别名折叠为官方字段名，运行时只读 accessToken
+                    content = json.dumps(auth_oauth.normalize_cred_data(data),
+                                         ensure_ascii=False).encode("utf-8")
                     gateway._store_credential(directory, name, content, uid, replace_existing=body.get("replace", False))
                     results.append({"name": name, "ok": True})
                 except Exception:

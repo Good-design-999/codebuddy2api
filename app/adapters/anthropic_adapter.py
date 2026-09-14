@@ -155,8 +155,11 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
                 if isinstance(output, list):
                     output = _convert_content_blocks(output)
                 if block.get("is_error") is True:
-                    # Chat 协议无等价字段：失败标记编码进正文前缀，模型不再把失败当有效结果
-                    output = "[tool execution failed]\n" + (output or "")
+                    # Chat 协议无等价字段：失败标记编码进正文；含图片的列表内容前置文本块而非拼接
+                    if isinstance(output, list):
+                        output = [{"type": "text", "text": "[tool execution failed]"}] + output
+                    else:
+                        output = "[tool execution failed]\n" + (output or "")
                 result.append({"role": "tool", "tool_call_id": tc_id, "content": output})
         if user_blocks:
             # 工具结果必须紧随 assistant 的 tool_calls；普通文本排在它们之后

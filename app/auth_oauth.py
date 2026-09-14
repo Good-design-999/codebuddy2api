@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import re
 import threading
@@ -93,6 +94,28 @@ def validate_cred_data(data) -> tuple[str | None, str | None]:
     except ValueError:
         return None, "凭据的地域或产品信息无效、不一致"
     return uid, None
+
+
+def normalize_cred_data(data: dict) -> dict:
+    """校验通过后生成唯一规范形态：token 别名折叠为官方字段名。
+
+    运行时（client_profiles.credential_headers 等）只读 accessToken/refreshToken；
+    导入侧若接受别名却不归一化，会得到「导入成功但认证头为空」的凭据。"""
+    out = copy.deepcopy(data)
+    auth = out.get("auth")
+    if not isinstance(auth, dict):
+        return out
+    for canonical, aliases in (("accessToken", ("access_token", "token")),
+                               ("refreshToken", ("refresh_token",)),
+                               ("tokenType", ("token_type",))):
+        if not auth.get(canonical):
+            for alias in aliases:
+                if auth.get(alias):
+                    auth[canonical] = auth[alias]
+                    break
+        for alias in aliases:
+            auth.pop(alias, None)
+    return out
 
 
 def _norm_ts(v) -> int | None:
