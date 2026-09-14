@@ -716,8 +716,8 @@ class CredentialPool:
         except (TypeError, ValueError):
             return False
 
-    def _eligible(self, entry, model, *, region=None, profile=None):
-        if not model_policy.route_allowed(CONFIG, entry, model):
+    def _eligible(self, entry, model, *, region=None, profile=None, rule=None):
+        if not model_policy.route_allowed(CONFIG, entry, model, rule=rule):
             return False
         actual = self._entry_profile(entry)
         profile = profile or actual

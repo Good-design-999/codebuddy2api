@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { OAuth } from "../OAuth";
 import {
   api,
   credentialResponse,
@@ -13,6 +14,7 @@ import {
 } from "../api";
 import {
   Badge,
+  DataValue,
   Drawer,
   Empty,
   ErrorNotice,
@@ -21,6 +23,7 @@ import {
   PageTitle,
   Panel,
   ResourceState,
+  profileLabel,
 } from "../components";
 import { prepareImports, type ImportResult } from "../imports";
 import { downloadFilename } from "../downloads";
@@ -30,154 +33,13 @@ function expiry(value: unknown, milliseconds = false) {
     ? new Date(milliseconds ? value : value * 1000).toLocaleString("zh-CN")
     : text(value);
 }
-export function safeOAuthUrl(value: unknown): string {
-  if (typeof value !== "string") throw new Error("OAuth 响应缺少验证链接");
-  const url = new URL(value);
-  if (
-    url.protocol !== "https:" ||
-    (url.port !== "" && url.port !== "443") ||
-    url.username ||
-    url.password ||
-    ![
-      "www.codebuddy.cn",
-      "www.codebuddy.ai",
-      "www.workbuddy.cn",
-      "www.workbuddy.ai",
-      "copilot.tencent.com",
-    ].includes(url.hostname)
-  )
-    throw new Error("服务返回了不在官方白名单中的 OAuth 链接");
-  return url.href;
-}
-function OAuth({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const [site, setSite] = useState("cn");
-  const [login, setLogin] = useState<{ id: string; url: string; until: number } | null>(null);
-  const [message, setMessage] = useState("选择站点后发起授权。");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const controller = useRef<AbortController | null>(null);
-  useEffect(() => () => controller.current?.abort(), []);
-  useEffect(() => {
-    if (!login) return;
-    const abort = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      if (Date.now() > login.until) {
-        setLogin(null);
-        setMessage("授权已过期，请重新发起。");
-        return;
-      }
-      if (document.visibilityState === "hidden") {
-        timer = setTimeout(() => {
-          void poll();
-        }, 4000);
-        return;
-      }
-      try {
-        const response = await api.get<unknown>("/oauth/poll", {
-          params: { login_id: login.id },
-          signal: abort.signal,
-        });
-        const data = object(response.data);
-        if (typeof data.done !== "boolean") throw new Error("OAuth 轮询响应缺少 done 状态");
-        if (abort.signal.aborted) return;
-        if (data.done) {
-          setLogin(null);
-          if (data.error) setError(text(data.error));
-          else {
-            setMessage("授权完成，凭证已添加。");
-            onDone();
-          }
-          return;
-        }
-        timer = setTimeout(() => {
-          void poll();
-        }, 4000);
-      } catch (err) {
-        if (!abort.signal.aborted) {
-          setError(errorMessage(err));
-          setLogin(null);
-          setMessage("请重新发起授权。");
-        }
-      }
-    };
-    timer = setTimeout(() => {
-      void poll();
-    }, 4000);
-    return () => {
-      abort.abort();
-      clearTimeout(timer);
-    };
-  }, [login, onDone]);
-  return (
-    <Drawer title="OAuth 添加凭证" onClose={onClose}>
-      <p className={s.note}>请仅在官方站点完成授权。</p>
-      <label className={s.field}>
-        登录站点
-        <select value={site} disabled={!!login || busy} onChange={(e) => setSite(e.target.value)}>
-          <option value="cn">中国大陆 · CN</option>
-          <option value="intl">国际 · WorkBuddy</option>
-          <option value="intl-codebuddy">国际 · CodeBuddy</option>
-        </select>
-      </label>
-      <ErrorNotice message={error} />
-      <p role="status">{message}</p>
-      {login ? (
-        <>
-          <a className={s.linkButton} href={login.url} target="_blank" rel="noopener noreferrer">
-            打开官方授权页面 <Icon name="arrow" />
-          </a>
-          <button
-            onClick={() => {
-              setLogin(null);
-              setMessage("已停止查询。");
-            }}
-          >
-            停止轮询
-          </button>
-        </>
-      ) : (
-        <button
-          className={s.primary}
-          disabled={busy}
-          onClick={() => {
-            setError(null);
-            setBusy(true);
-            controller.current = new AbortController();
-            void api
-              .post<unknown>("/oauth/start", null, {
-                params: { site },
-                signal: controller.current.signal,
-              })
-              .then((res) => {
-                const d = object(res.data);
-                if (typeof d.login_id !== "string") throw new Error("OAuth 响应缺少 login_id");
-                const seconds = number(d.expires_in);
-                setLogin({
-                  id: d.login_id,
-                  url: safeOAuthUrl(d.verification_uri),
-                  until: Date.now() + Math.min(seconds ?? 300, 600) * 1000,
-                });
-                setMessage("等待官方授权完成…");
-              })
-              .catch((err: unknown) => {
-                if (!controller.current?.signal.aborted) setError(errorMessage(err));
-              })
-              .finally(() => setBusy(false));
-          }}
-        >
-          {busy ? "正在发起…" : "发起 OAuth 授权"}
-        </button>
-      )}
-    </Drawer>
-  );
-}
+export { safeOAuthUrl } from "../OAuth";
 function ImportDrawer({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
   const [results, setResults] = useState<ImportResult[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   return (
-    <Drawer title="导入凭证" onClose={onClose}>
+    <Drawer title="导入凭证" onClose={onClose} dismissDisabled={busy}>
       <p className={s.note}>
         支持 UTF-8 .info 或 ZIP，ZIP 仅接受根目录 .info。单项 ≤ 1 MiB，每批 ≤ 100 项 / 32
         MiB，不覆盖现有文件。
@@ -241,6 +103,12 @@ export function Credentials() {
   const [deleting, setDeleting] = useState<Credential | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const oauthDone = useCallback(() => {
+    setDrawer(null);
+    setNotice("授权完成，凭证已添加。");
+    resource.reload();
+  }, [resource.reload]);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -272,6 +140,11 @@ export function Credentials() {
           </>
         }
       />
+      {notice && (
+        <p className={s.successNotice} role="status">
+          {notice}
+        </p>
+      )}
       <ResourceState {...resource} />
       <ErrorNotice message={error} />
       <Panel
@@ -345,7 +218,7 @@ export function Credentials() {
                         <td>
                           <strong>{c.name ?? "安全文件名不可用"}</strong>
                           <small>
-                            {text(c.profile)} · {text(c.nickname ?? c.uid)}
+                            {profileLabel(text(c.profile))} · {text(c.nickname ?? c.uid)}
                           </small>
                           <small>
                             {c.sync_pending === true
@@ -397,7 +270,7 @@ export function Credentials() {
                               <Badge>无模型冷却</Badge>
                             )
                           ) : c.model_cooldowns ? (
-                            text(c.model_cooldowns)
+                            <DataValue value={c.model_cooldowns} />
                           ) : (
                             "未知"
                           )}
@@ -446,7 +319,7 @@ export function Credentials() {
             <Empty title="还没有凭证">添加账号或导入 .info 文件。</Empty>
           ))}
       </Panel>
-      {drawer === "oauth" && <OAuth onClose={() => setDrawer(null)} onDone={resource.reload} />}{" "}
+      {drawer === "oauth" && <OAuth onClose={() => setDrawer(null)} onDone={oauthDone} />}
       {drawer === "import" && (
         <ImportDrawer onClose={() => setDrawer(null)} onDone={resource.reload} />
       )}{" "}
@@ -456,7 +329,7 @@ export function Credentials() {
         </Drawer>
       )}
       {deleting && (
-        <Drawer title="删除凭证" onClose={() => setDeleting(null)}>
+        <Drawer title="删除凭证" onClose={() => setDeleting(null)} dismissDisabled={busy}>
           <div className={s.warning}>
             将永久删除 {deleting.name}，不可撤销。如已绑定模型规则，请先解除绑定。
           </div>
@@ -473,7 +346,7 @@ export function Credentials() {
         </Drawer>
       )}
       {drawer === "export" && (
-        <Drawer title="导出明文凭证" onClose={() => setDrawer(null)}>
+        <Drawer title="导出明文凭证" onClose={() => setDrawer(null)} dismissDisabled={busy}>
           <div className={s.warning}>
             <Icon name="alert" />
             <div>
