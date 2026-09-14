@@ -94,7 +94,7 @@ class AuditStoreTests(unittest.TestCase):
         self.store.record_request(self.record(input_tokens=0))
         self.store.clear("details")
         with closing(sqlite3.connect(self.path)) as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
             for table in ("stats_hourly", "stats_daily", "stats_totals"):
                 rows = db.execute(f"SELECT dimension,payload FROM {table}").fetchall()
                 self.assertEqual({r[0] for r in rows}, {"global", "model", "profile", "credential"})
@@ -135,6 +135,29 @@ class AuditStoreTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(self.store.storage()["last_error"], "TimeoutError")
 
+    def test_v1_ingest_table_migrates_with_backfilled_timestamps(self):
+        """v1 库（ingest 无 created_at）打开即迁移：列回填、索引建立、保留期内仍可去重。"""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "audit.sqlite3"
+            with closing(sqlite3.connect(str(path))) as db:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("CREATE TABLE ingest (id TEXT PRIMARY KEY, kind TEXT NOT NULL)")  # v1 形状
+                db.execute("INSERT INTO ingest VALUES('legacy-req', 'request')")
+                db.execute("PRAGMA user_version=1")
+                db.execute("COMMIT")
+            store = AuditStore(path)
+            try:
+                with closing(sqlite3.connect(str(path))) as db:
+                    self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+                    columns = [row[1] for row in db.execute("PRAGMA table_info(ingest)").fetchall()]
+                    self.assertIn("created_at", columns)
+                    self.assertGreater(db.execute(
+                        "SELECT created_at FROM ingest WHERE id='legacy-req'").fetchone()[0], 0)
+                self.assertTrue(store.record_request(self.record("fresh"))["recorded"])
+                self.assertEqual(store.record_request(self.record("legacy-req"))["reason"], "duplicate")
+            finally:
+                store.close()
+
     def test_concurrent_duplicate_ingest_exactly_once(self):
         record = self.record()
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -152,7 +175,8 @@ class AuditStoreTests(unittest.TestCase):
         self.store.record_request(self.record("old", started_at=time.time() - 31 * 86400))
         self.assertIsNone(self.store.get_request("old"))
         self.assertEqual(self.store.dashboard(90)["summary"]["requests"], 2)
-        self.assertEqual(self.store.record_request(self.record("old"))["reason"], "duplicate")
+        # 去重行与明细同截止期过期：超过保留期的旧 ID 不再判定为重复（防重放仅限保留期内）
+        self.assertTrue(self.store.record_request(self.record("old"))["recorded"])
         health = self.store.storage()
         for name in ("db_bytes", "wal_bytes", "shm_bytes"):
             self.assertIsInstance(health[name], int)
@@ -398,7 +422,8 @@ class AuditStoreTests(unittest.TestCase):
             if not health["pending_cleanup"]:
                 break
         self.assertFalse(health["pending_cleanup"])
-        self.assertEqual(self.assert_accounting(), (0, 0, 0, count))
+        # 去重行与明细同截止期过期：ingest 数归零，聚合统计不受影响
+        self.assertEqual(self.assert_accounting(), (0, 0, 0, 0))
         self.assertEqual(self.aggregate_snapshot(), aggregates)
         self.assertFalse(health["degraded"])
 

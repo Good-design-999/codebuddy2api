@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import re
 import threading
@@ -69,6 +70,15 @@ def _token_issuer_origin(access_token: str) -> str:
         return ""
 
 
+def _reject_constant(value):
+    raise ValueError(f"非标准 JSON 常量: {value}")
+
+
+def loads_strict(text):
+    """严格 JSON 解析：拒绝 NaN/Infinity 等非标准常量（json.loads 默认接受）。"""
+    return json.loads(text, parse_constant=_reject_constant)
+
+
 def validate_cred_data(data) -> tuple[str | None, str | None]:
     """入库校验（严格模式）：返回 (uid, None) 或 (None, 原因)。"""
     if not isinstance(data, dict):
@@ -84,6 +94,14 @@ def validate_cred_data(data) -> tuple[str | None, str | None]:
     token = auth.get("accessToken") or auth.get("access_token") or auth.get("token")
     if not isinstance(token, str) or not token:
         return None, "缺少有效的 accessToken"
+    for field in ("expiresAt", "lastRefreshTime"):
+        value = auth.get(field)
+        if value is None:
+            continue
+        # 原值范围比较同时拒绝非有限浮点数，避免超大整数转 float 溢出。
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not 0 < value < 4102444800000:  # 上限 2100-01-01
+            return None, f"{field} 必须是合理范围内的有限毫秒时间戳"
     domain = _normalize_origin(auth.get("domain") or auth.get("issuer") or "")
     issuer = _token_issuer_origin(token)
     if not any(o in ALLOWED_ORIGINS for o in (domain, issuer) if o):
@@ -93,6 +111,28 @@ def validate_cred_data(data) -> tuple[str | None, str | None]:
     except ValueError:
         return None, "凭据的地域或产品信息无效、不一致"
     return uid, None
+
+
+def normalize_cred_data(data: dict) -> dict:
+    """校验通过后生成唯一规范形态：token 别名折叠为官方字段名。
+
+    运行时（client_profiles.credential_headers 等）只读 accessToken/refreshToken；
+    导入侧若接受别名却不归一化，会得到「导入成功但认证头为空」的凭据。"""
+    out = copy.deepcopy(data)
+    auth = out.get("auth")
+    if not isinstance(auth, dict):
+        return out
+    for canonical, aliases in (("accessToken", ("access_token", "token")),
+                               ("refreshToken", ("refresh_token",)),
+                               ("tokenType", ("token_type",))):
+        if not auth.get(canonical):
+            for alias in aliases:
+                if auth.get(alias):
+                    auth[canonical] = auth[alias]
+                    break
+        for alias in aliases:
+            auth.pop(alias, None)
+    return out
 
 
 def _norm_ts(v) -> int | None:

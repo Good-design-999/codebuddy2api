@@ -37,6 +37,8 @@ CHECKIN_PATHS = ("/billing/meter/daily-checkin", "/v2/billing/meter/daily-checki
 RESOURCE_PATH = "/v2/billing/meter/get-user-resource"
 CONFIG_PATH = "/v3/config"  # cbc CLI CloudProductProvider 同源：云端模型表
 RESOURCE_PRODUCT_CODE = "p_tcaca"
+CREDITS_PAGE_SIZE = 100
+CREDITS_MAX_PAGES = 20  # 2000 个积分包封顶；到顶必须 partial 标记，不得装作完整
 
 _INACTIVE_RE = re.compile(r"未开启|未开始|未开放|已过期|无.*活动|活动.*(?:结束|关闭|暂停)", re.I)
 _ALREADY_RE = re.compile(r"已签到|已领取|已经.*(?:签到|领取)|重复签到|already", re.I)
@@ -274,12 +276,12 @@ def soonest_expiry(segments: list, now: float | None = None) -> float | None:
     return min(exps) if exps else None
 
 
-def _resource_body() -> dict:
+def _resource_body(page: int) -> dict:
     """与官方 Web 端一致：有效状态 [0,3]，结束时间范围 现在 ~ +101 年（只取未过期包）。"""
     fmt = "%Y-%m-%d %H:%M:%S"
     return {
-        "PageNumber": 1,
-        "PageSize": 100,
+        "PageNumber": page,
+        "PageSize": CREDITS_PAGE_SIZE,
         "ProductCode": RESOURCE_PRODUCT_CODE,
         "Status": [0, 3],
         "PackageEndTimeRangeBegin": time.strftime(fmt),
@@ -287,41 +289,69 @@ def _resource_body() -> dict:
     }
 
 
+def _fetch_accounts_page(client, url: str, headers: dict, page: int, *, retry_empty: bool) -> list:
+    """拉一页积分包（限次重试）；返回 Accounts 列表，失败抛 RuntimeError，401 抛 AuthExpiredError。"""
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            status, payload = _post_json(client, url, headers, _resource_body(page))
+        except AuthExpiredError:
+            raise
+        except httpx.HTTPError as e:
+            last_err = e
+            time.sleep(0.3 * (attempt + 1))
+            continue
+        if status != 200:
+            last_err = RuntimeError(f"积分接口 HTTP {status}")
+            time.sleep(0.3 * (attempt + 1))
+            continue
+        code = payload.get("code")
+        if code not in (0, None):
+            raise RuntimeError(str(payload.get("msg") or f"积分接口 code={code}"))
+        data = payload.get("data") or {}
+        resp = (data.get("Response") or {}).get("Data") or (data.get("data") or {}).get("Response", {}).get("Data") or data
+        # 区分「合法的零余额」与「结构缺失的未知失败」：只有 Accounts/accounts 键存在才算有效响应
+        accounts = None
+        if isinstance(resp, dict) and isinstance(resp.get("Accounts"), list):
+            accounts = resp["Accounts"]
+        elif isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("accounts"), list):
+            accounts = payload["data"]["accounts"]
+        if accounts is None:
+            last_err = RuntimeError("积分接口返回缺少 Accounts 结构")
+            time.sleep(0.3 * (attempt + 1))
+            continue
+        if not accounts and retry_empty and attempt < 2:  # 偶发空 Accounts，重试一次
+            time.sleep(0.3 * (attempt + 1))
+            continue
+        return accounts
+    raise RuntimeError(f"积分查询失败: {last_err}")
+
+
 def fetch_credits(access_token: str, uid: str = "", domain: str = "") -> dict:
-    """查询剩余积分：{credits, count, segments, soonest_expiry}。空结果重试，401 抛 AuthExpiredError。"""
+    """查询剩余积分：{credits, count, segments, soonest_expiry, partial}。401 抛 AuthExpiredError。
+
+    分页遍历到不足一页为止；达到 CREDITS_MAX_PAGES 上限时 partial=True，调用方不得把结果当完整值。"""
     host = hosts_for_token(access_token, domain)[0]
     url = host + RESOURCE_PATH
     headers = _web_headers(host, access_token, uid, domain)
-    last_err: Exception | None = None
+    accounts: list = []
+    partial = False
     with httpx.Client() as client:
-        for attempt in range(3):
-            try:
-                status, payload = _post_json(client, url, headers, _resource_body())
-            except AuthExpiredError:
-                raise
-            except httpx.HTTPError as e:
-                last_err = e
-                time.sleep(0.3 * (attempt + 1))
-                continue
-            if status != 200:
-                last_err = RuntimeError(f"积分接口 HTTP {status}")
-                time.sleep(0.3 * (attempt + 1))
-                continue
-            code = payload.get("code")
-            if code not in (0, None):
-                raise RuntimeError(str(payload.get("msg") or f"积分接口 code={code}"))
-            data = payload.get("data") or {}
-            resp = (data.get("Response") or {}).get("Data") or (data.get("data") or {}).get("Response", {}).get("Data") or data
-            accounts = resp.get("Accounts") or payload.get("data", {}).get("accounts") or []
-            if not accounts and attempt < 2:  # 偶发空 Accounts，重试一次
-                time.sleep(0.3 * (attempt + 1))
-                continue
-            segments = merge_segments(extract_segments(accounts))
-            credits = round(sum(s["remaining"] for s in segments), 2)
-            return {"credits": credits, "count": len(accounts), "segments": segments,
-                    "soonest_expiry": soonest_expiry(segments),
-                    "intl": is_international_host(host)}
-    raise RuntimeError(f"积分查询失败: {last_err}")
+        page = 0
+        while True:
+            page += 1
+            if page > CREDITS_MAX_PAGES:
+                partial = True
+                break
+            rows = _fetch_accounts_page(client, url, headers, page, retry_empty=True)  # 空页在任何页都可能是瞬时现象，一律重试
+            accounts.extend(rows)
+            if len(rows) < CREDITS_PAGE_SIZE:
+                break
+    segments = merge_segments(extract_segments(accounts))
+    credits = round(sum(s["remaining"] for s in segments), 2)
+    return {"credits": credits, "count": len(accounts), "segments": segments,
+            "soonest_expiry": soonest_expiry(segments),
+            "intl": is_international_host(host), "partial": partial}
 
 
 
@@ -549,6 +579,8 @@ def aggregate_credits(creds_snapshot: dict) -> dict:
     return {"remaining": round(sum(g["remaining"] for g in groups.values()), 2),
             "used_by_quota": round(sum(g["used_by_quota"] for g in groups.values()), 2),
             "soonest_expiry": min(exps) if exps else None,
+            "partial": any(bool((e.get("credits") or {}).get("partial"))
+                           for e in dedupe_by_identity(creds_snapshot).values()),
             "groups": groups}
 
 
@@ -557,7 +589,7 @@ def fetch_request_usage(access_token: str, days: int = USAGE_MAX_DAYS,
                         uid: str = "", domain: str = "") -> dict:
     """拉官方用量明细，按 日期×模型 聚合实际扣减的 credits。
 
-    返回 {by_day: {'YYYY-MM-DD': {model: credits}}, total_credits, requests}。
+    返回 {by_day: {'YYYY-MM-DD': {model: credits}}, total_credits, requests, partial}。
     跨度超 31 天官方会静默返回空，故 days 强制夹到 USAGE_MAX_DAYS。"""
     days = max(1, min(int(days or USAGE_MAX_DAYS), USAGE_MAX_DAYS))
     host = hosts_for_token(access_token, domain)[0]
@@ -570,14 +602,22 @@ def fetch_request_usage(access_token: str, days: int = USAGE_MAX_DAYS,
     by_day: dict = {}
     total_credits = 0.0
     requests = 0
+    partial = False
     with httpx.Client() as client:
         for page in range(1, USAGE_MAX_PAGES + 1):
             status, payload = _post_json(client, url, headers,
                                          dict(body_base, pageNum=page, pageSize=USAGE_PAGE_SIZE))
             if status != 200:
                 raise RuntimeError(f"用量明细接口 HTTP {status}")
-            data = payload.get("data") or {}
-            rows = data.get("data") or []
+            code = payload.get("code")
+            if code not in (0, None):
+                raise RuntimeError(f"用量明细接口 code={code}: {str(payload.get('msg'))[:120]}")
+            data = payload.get("data")
+            # HTTP 200 但缺少业务结构不是「零用量」：total 缺失还会让分页提前中断
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list) \
+                    or not isinstance(data.get("total"), (int, float)):
+                raise RuntimeError("用量明细接口返回缺少 data.data/total 结构")
+            rows = data["data"]
             for row in rows:
                 date = str(row.get("requestTime") or "")[:10]
                 model = str(row.get("model") or "unknown")
@@ -588,9 +628,12 @@ def fetch_request_usage(access_token: str, days: int = USAGE_MAX_DAYS,
                 by_day[date][model] = round(by_day[date].get(model, 0.0) + credit, 6)
                 total_credits += credit
                 requests += 1
-            if requests >= int(data.get("total") or 0) or not rows:
+            if requests >= int(data["total"]) or not rows:
                 break
-    return {"by_day": by_day, "total_credits": round(total_credits, 2), "requests": requests}
+        else:
+            partial = True  # 达到页数上限仍可能有剩余：标记不完整，不装作全量
+    return {"by_day": by_day, "total_credits": round(total_credits, 2), "requests": requests,
+            "partial": partial}
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +718,7 @@ class CreditLedger:
                 "soonest_expiry": result.get("soonest_expiry"),
                 "fetched_at": time.time(),
                 "intl": bool(result.get("intl")),  # 站点归属：国内/国际积分与单价均独立
+                "partial": bool(result.get("partial")),  # 分页到顶：余额被低估，下游必须可见
             }
             e["error"] = None
             self._save()

@@ -239,6 +239,20 @@ test("credential OAuth terminates, upload/export and safe-name deletion are wire
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "我理解明文风险，下载已选凭证" }).click();
   expect((await downloadPromise).suggestedFilename()).toBe("mock-account.info");
+  const unicodeFilename = "测试 账号.info";
+  await page.route("**/admin/credentials/export", (route) =>
+    route.fulfill({
+      body: '{"test_fixture":true}',
+      contentType: "application/octet-stream",
+      headers: {
+        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(unicodeFilename)}`,
+      },
+    }),
+  );
+  await page.getByRole("button", { name: "导出已选 (1)" }).click();
+  const unicodeDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "我理解明文风险，下载已选凭证" }).click();
+  expect((await unicodeDownload).suggestedFilename()).toBe(unicodeFilename);
   await page.getByRole("button", { name: "删除", exact: true }).click();
   await page.getByRole("button", { name: "确认删除凭证" }).click();
   await expect

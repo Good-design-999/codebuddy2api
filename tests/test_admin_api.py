@@ -401,6 +401,23 @@ class AdminApiTests(unittest.TestCase):
         response = self.client.post("/admin/credentials/upload", headers=self.headers, json=payload)
         self.assertFalse(response.json()["results"][0]["ok"])
 
+    def test_upload_normalizes_token_aliases_to_canonical_fields(self):
+        """只含 access_token/token 别名的凭据：落盘内容必须折叠为 accessToken，别名键移除。"""
+        data = self.credential()
+        auth = data.pop("auth")
+        data["auth"] = {**{k: v for k, v in auth.items() if k != "accessToken"},
+                        "access_token": auth["accessToken"], "token_type": "Bearer",
+                        "refresh_token": "synthetic-refresh"}
+        payload = {"files": [{"name": "first.info", "content": json.dumps(data)}]}
+        response = self.client.post("/admin/credentials/upload", headers=self.headers, json=payload)
+        self.assertTrue(response.json()["results"][0]["ok"], response.text)
+        saved = json.loads(self.gateway._store_credential.call_args.args[2].decode("utf-8"))
+        self.assertEqual(saved["auth"]["accessToken"], "synthetic-token")
+        self.assertEqual(saved["auth"]["refreshToken"], "synthetic-refresh")
+        self.assertNotIn("access_token", saved["auth"])
+        self.assertNotIn("refresh_token", saved["auth"])
+        self.assertNotIn("token", saved["auth"])
+
     def test_export_only_selected_info_and_symlink_identity_protection(self):
         content = json.dumps(self.credential())
         (self.root / "first.info").write_text(content)

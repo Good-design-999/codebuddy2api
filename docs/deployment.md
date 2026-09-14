@@ -49,16 +49,29 @@ Requires Python, uv, and Node.js with the vp CLI to build the interface:
 
 ```bash
 uv venv
-uv pip install -r requirements.txt
+uv pip install --require-hashes --only-binary=:all: -r requirements.txt
 (cd web && vp install --frozen-lockfile && vp build)
 uv run --env-file .env converter.py --desensitize
 ```
 
 Configure `.env` as above before starting, then open `/dashboard` to add accounts. Rebuild the WebUI after changing frontend source.
 
-Without uv, run `python3 -m venv .venv`, activate it, install dependencies with `pip install -r requirements.txt`, and start with `python3 converter.py --desensitize`. **Plain Python does not load `.env`**; export environment variables or pass CLI flags explicitly.
+Without uv, run `python3 -m venv .venv`, activate it, install dependencies with `pip install --require-hashes --only-binary=:all: -r requirements.txt`, and start with `python3 converter.py --desensitize`. **Plain Python does not load `.env`**; export environment variables or pass CLI flags explicitly.
 
 Local Python binding uses `--host` and `--port`. Compose-only `CODEBUDDY2API_BIND`, `CODEBUDDY2API_PORT` and `CODEBUDDY2API_AUTH_PATH` do not change the local listener or data directory.
+
+## Dependency locks
+
+`requirements.in` lists direct dependencies; install the committed, hash-locked `requirements.txt`. To regenerate it with uv:
+
+```bash
+uv pip compile --universal --python-version 3.12 --no-python-downloads --generate-hashes requirements.in -o requirements.txt
+```
+
+Existing pins are reused; use `--upgrade-package NAME` only for deliberate updates and review the lockfile diff. Installation requires matching binary wheels and hashes; fix the lock or roll back rather than disabling those checks.
+
+Docker's build frontend, Node and Python images are pinned by multi-platform digest. When refreshing them, retain `linux/amd64` and `linux/arm64` support and verify the build. Locks prevent drift, not future vulnerabilities; security updates still require reviewed refreshes.
+
 
 ## CLI login
 

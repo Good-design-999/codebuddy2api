@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api,
   errorMessage,
@@ -43,6 +43,8 @@ export function Logs() {
   const [detail, setDetail] = useState<RecordValue | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const detailRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => detailRequest.current?.abort(), []);
   const [clear, setClear] = useState(false);
   const params = new URLSearchParams({ kind, limit: "50" });
   Object.entries(filters).forEach(([key, value]) => {
@@ -50,20 +52,42 @@ export function Logs() {
   });
   if (cursors.length) params.set("cursor", cursors.at(-1)!);
   const resource = useResource(`/logs?${params.toString()}`, normalize);
+  const closeDetail = () => {
+    detailRequest.current?.abort();
+    detailRequest.current = null;
+    setDetail(null);
+    setDetailError(null);
+    setDetailLoading(false);
+  };
   const openDetail = (item: RecordValue) => {
+    detailRequest.current?.abort();
+    detailRequest.current = null;
     setDetail(item);
     setDetailError(null);
+    setDetailLoading(false);
     if (kind !== "request") return;
     if (typeof item.id !== "string") {
       setDetailError("请求记录缺少 ID，无法加载详情");
       return;
     }
+    const controller = new AbortController();
+    detailRequest.current = controller;
+    const active = () => detailRequest.current === controller && !controller.signal.aborted;
     setDetailLoading(true);
     void api
-      .get<unknown>(`/logs/${encodeURIComponent(item.id)}`)
-      .then((res) => setDetail(object(res.data)))
-      .catch((err: unknown) => setDetailError(errorMessage(err)))
-      .finally(() => setDetailLoading(false));
+      .get<unknown>(`/logs/${encodeURIComponent(item.id)}`, { signal: controller.signal })
+      .then((res) => {
+        if (active()) setDetail(object(res.data));
+      })
+      .catch((err: unknown) => {
+        if (active()) setDetailError(errorMessage(err));
+      })
+      .finally(() => {
+        if (active()) {
+          detailRequest.current = null;
+          setDetailLoading(false);
+        }
+      });
   };
   return (
     <>
@@ -91,6 +115,7 @@ export function Logs() {
             aria-selected={kind === value}
             className={kind === value ? s.selectedTab : ""}
             onClick={() => {
+              closeDetail();
               setKind(value);
               setCursors([]);
               setFilters(emptyFilters);
@@ -265,13 +290,7 @@ export function Logs() {
         </div>
       </Panel>
       {detail && (
-        <Drawer
-          title="日志详情与实际尝试"
-          onClose={() => {
-            setDetail(null);
-            setDetailError(null);
-          }}
-        >
+        <Drawer title="日志详情与实际尝试" onClose={closeDetail}>
           <ErrorNotice message={detailError} />
           {detailLoading ? (
             <p role="status">正在加载详情…</p>

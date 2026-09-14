@@ -8,7 +8,7 @@ services:
     build: .
     container_name: codebuddy2api
     ports:
-      - "${CODEBUDDY2API_BIND:-0.0.0.0}:${CODEBUDDY2API_PORT:-8787}:8787"
+      - "${CODEBUDDY2API_BIND:-127.0.0.1}:${CODEBUDDY2API_PORT:-8787}:8787"
     volumes:
       # .info 凭证、control.sqlite3、logs.sqlite3 及 SQLite WAL/SHM 共用持久目录。
       # SQLite 需要可写的本地文件系统；不要只挂载单个数据库文件。
@@ -24,6 +24,8 @@ services:
       CODEBUDDY2API_LOG_BODY_LIMIT: ${CODEBUDDY2API_LOG_BODY_LIMIT:-65536}
       CODEBUDDY2API_LOG: ${CODEBUDDY2API_LOG:-}
       CODEBUDDY2API_AUTO_TRIAL: ${CODEBUDDY2API_AUTO_TRIAL:-false}
+      # 容器内固定 0.0.0.0；对外暴露边界由上方 BIND 端口映射控制（默认仅回环）
+      CODEBUDDY2API_ALLOW_OPEN_NOAUTH: "true"
       CODEBUDDY_AUTH_DIR: /data/auth
     command: >
       python3 converter.py
