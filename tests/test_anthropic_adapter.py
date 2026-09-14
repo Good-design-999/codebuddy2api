@@ -423,6 +423,21 @@ def test_disable_parallel_tool_use_is_mapped():
     assert "parallel_tool_calls" not in chat
     print("✅ test_disable_parallel_tool_use_is_mapped")
 
+def test_stop_sequences_are_mapped():
+    """stop_sequences 映射为上游 stop；显式 stop 优先；错误类型显式拒绝。"""
+    base = {"model": "auto", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}]}
+    chat = anthropic_request_to_chat({**base, "stop_sequences": ["\n\n", "END"]})
+    assert chat["stop"] == ["\n\n", "END"]
+    chat = anthropic_request_to_chat({**base, "stop": ["X"], "stop_sequences": ["Y"]})
+    assert chat["stop"] == ["X"]
+    try:
+        anthropic_request_to_chat({**base, "stop_sequences": "END"})
+        raise AssertionError("non-array stop_sequences must raise")
+    except ValueError:
+        pass
+    print("✅ test_stop_sequences_are_mapped")
+
 
 if __name__ == "__main__":
     test_simple_text_request()
@@ -439,4 +454,5 @@ if __name__ == "__main__":
     test_nonstream_response_tool_use()
     test_empty_messages()
     test_disable_parallel_tool_use_is_mapped()
-    print(f"\n🎉 All {14} tests passed!")
+    test_stop_sequences_are_mapped()
+    print(f"\n🎉 All {15} tests passed!")

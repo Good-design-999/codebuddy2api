@@ -99,6 +99,12 @@ def anthropic_request_to_chat(body: dict) -> dict:
     for key in ("temperature", "top_p", "stop", "top_k"):
         if key in body:
             chat[key] = body[key]
+    # Anthropic 正式停止序列字段；显式 stop 优先
+    stop_sequences = body.get("stop_sequences")
+    if stop_sequences is not None and "stop" not in chat:
+        if not isinstance(stop_sequences, list) or not all(isinstance(s, str) for s in stop_sequences):
+            raise ValueError("stop_sequences must be an array of strings")
+        chat["stop"] = stop_sequences
 
     return chat
 
