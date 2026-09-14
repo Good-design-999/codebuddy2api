@@ -651,6 +651,14 @@ def test_sync_usage_keeps_per_account_snapshots_on_failure():
         credits.fetch_request_usage = fake_fetch
         converter.CONFIG.update(usage_daily=None, usage_daily_accounts=None, control_store=None)
         try:
+            # 首轮即有账号失败且无任何历史快照：也必须标 stale/partial，不能装作精确
+            failing.add("token-u2")
+            converter._sync_usage(pool)
+            view = converter.CONFIG["usage_daily"]
+            assert view["total_credits"] == 10.0 and view["requests"] == 1
+            assert view["partial"] is True and view["stale_accounts"] == ["u2.info"]
+
+            failing.clear()
             converter._sync_usage(pool)
             view = converter.CONFIG["usage_daily"]
             assert view["total_credits"] == 30.0 and view["requests"] == 3

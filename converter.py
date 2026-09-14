@@ -1260,7 +1260,9 @@ def _publish_usage_daily(pool, stale=()):
         newest = max(newest, float(snap.get("fetched_at") or 0))
         if snap.get("partial"):
             partial = True
-        if cred_id in stale:
+    # 本轮失败的启用账号即使没有任何历史快照也必须可见，否则不完整聚合被当成精确值
+    for cred_id in stale:
+        if cred_id in enabled:
             partial = True
             stale_out.append(Path(cred_id).name)
     if not included:
