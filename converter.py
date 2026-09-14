@@ -2586,11 +2586,15 @@ async def _fetch_checked_chat(url, headers, body, model_name, rid, cred=None, *,
             observe_usage(result.get("usage") or {})
             return result
         # 审核拒绝不是工具损坏，不因 required 工具选择而重复生成。
-        if detector.detected or not body.get("tools") or tool_attempt >= _TOOL_CALL_MAX_RETRY:
+        budget = CONFIG.get("tool_call_max_retry", _TOOL_CALL_MAX_RETRY)
+        if detector.detected or not body.get("tools") or tool_attempt >= budget:
             raise UpstreamResponseError(502, b"Invalid upstream tool_calls after retries")
         tool_attempt += 1
-        _log(f"[{rid}] tool_calls 损坏，重试 {tool_attempt}/{_TOOL_CALL_MAX_RETRY} | {model_name}")
-
+        # 被丢弃的这次生成也是真实消耗：连同序号记进 attempts，账务不再只看见最后一次
+        discarded = result.get("usage") or {}
+        observe_attempt("tool_args_retry", attempt=tool_attempt, max_attempts=budget,
+                        total_tokens=discarded.get("total_tokens"))
+        _log(f"[{rid}] tool_calls 损坏，重试 {tool_attempt}/{budget} | {model_name}")
 
 async def _chat_sse_lines(url, headers, body, model_name, t0, rid, cred=None, *, aggregate=False):
     """提供公共 Chat SSE 行流；流式请求不做审核重试，正文检测缓冲有界。"""
@@ -3026,6 +3030,9 @@ def main():
     ap.add_argument("--log-body-limit", type=_nonnegative_int, metavar="BYTES",
                     default=os.environ.get("CODEBUDDY2API_LOG_BODY_LIMIT", "65536"),
                     help="每条正文日志的预览字节上限，默认 64 KiB；0 只记录摘要")
+    ap.add_argument("--tool-call-max-retry", type=_nonnegative_int, metavar="N",
+                    default=os.environ.get("CODEBUDDY2API_TOOL_CALL_MAX_RETRY", "3"),
+                    help="工具参数损坏时的额外生成上限，默认 3；0 表示不重试（每次额外生成都消耗额度）")
     ap.add_argument("--auto-trial", type=_boolean_arg, nargs="?", const=True,
                     default=os.environ.get("CODEBUDDY2API_AUTO_TRIAL", "false"),
                     help="自动领取国际 WorkBuddy 一次性体验积分，默认关闭")
@@ -3035,7 +3042,8 @@ def main():
     if args.command == "login":
         return login(site=args.site, open_browser=not args.no_browser)
 
-    for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit", "auto_trial"):
+    for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit", "auto_trial",
+                "tool_call_max_retry"):
         CONFIG[key] = getattr(args, key)
     CONFIG["api_key"] = args.api_key
     CONFIG["desensitize"] = args.desensitize

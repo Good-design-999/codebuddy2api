@@ -188,6 +188,42 @@ class EndpointTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual(response.headers["content-type"], "application/json")
 
+    def test_discarded_tool_generations_are_recorded_with_usage(self):
+        """损坏工具调用触发的额外生成：每次丢弃都带用量记入 attempts；预算可配。"""
+        good = {"tool_calls": [{"index": 0, "id": "ok", "type": "function",
+                                "function": {"name": "synthetic_tool", "arguments": "{}"}}]}
+        bad = {"tool_calls": [{"index": 0, "id": "bad", "type": "function",
+                               "function": {"name": "synthetic_tool", "arguments": "{"}}]}
+        attempts = []
+        with patch.object(converter, "observe_attempt",
+                          side_effect=lambda stage, **kw: attempts.append((stage, kw))):
+            calls = {"n": 0}
+            def flaky(request):
+                calls["n"] += 1
+                return httpx.Response(200, content=sse(bad if calls["n"] == 1 else good, "tool_calls"))
+            self.respond = flaky
+            self.requests.clear()
+            payload = payload_for(ROUTES[0], 0)
+            payload["tools"] = TOOLS
+            response = self.client.post(ROUTES[0], json=payload)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(calls["n"], 2)
+            retries = [kw for stage, kw in attempts if stage == "tool_args_retry"]
+            self.assertEqual(len(retries), 1)
+            self.assertEqual(retries[0]["attempt"], 1)
+            self.assertIn("total_tokens", retries[0])  # 被丢弃的生成用量不再消失
+
+            converter.CONFIG["tool_call_max_retry"] = 0
+            try:
+                self.respond = lambda request: httpx.Response(200, content=sse(bad, "tool_calls"))
+                self.requests.clear()
+                nonstream = dict(payload, stream=False)  # 非流式：错误直接体现为 HTTP 状态码
+                response = self.client.post(ROUTES[0], json=nonstream)
+                self.assertEqual(response.status_code, 502, response.text)
+                self.assertEqual(len(self.requests), 1)  # 预算 0：不重试
+            finally:
+                converter.CONFIG["tool_call_max_retry"] = 3
+
     def test_tool_metadata_policy_reaches_all_protocols(self):
         description = "Read sandbox data without destructive changes."
         schema = {"type": "object", "title": "Lookup inputs", "properties": {
