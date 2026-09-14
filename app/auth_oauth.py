@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import math
 import re
 import threading
 import time
@@ -70,6 +71,15 @@ def _token_issuer_origin(access_token: str) -> str:
         return ""
 
 
+def _reject_constant(value):
+    raise ValueError(f"非标准 JSON 常量: {value}")
+
+
+def loads_strict(text):
+    """严格 JSON 解析：拒绝 NaN/Infinity 等非标准常量（json.loads 默认接受）。"""
+    return json.loads(text, parse_constant=_reject_constant)
+
+
 def validate_cred_data(data) -> tuple[str | None, str | None]:
     """入库校验（严格模式）：返回 (uid, None) 或 (None, 原因)。"""
     if not isinstance(data, dict):
@@ -85,6 +95,14 @@ def validate_cred_data(data) -> tuple[str | None, str | None]:
     token = auth.get("accessToken") or auth.get("access_token") or auth.get("token")
     if not isinstance(token, str) or not token:
         return None, "缺少有效的 accessToken"
+    for field in ("expiresAt", "lastRefreshTime"):
+        value = auth.get(field)
+        if value is None:
+            continue
+        # bool 是 int 子类必须显式排除；NaN/Infinity 会让到期判断与 JSON 序列化行为异常
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not math.isfinite(value) or not 0 < float(value) < 4102444800000:  # 上限 2100-01-01
+            return None, f"{field} 必须是合理范围内的有限毫秒时间戳"
     domain = _normalize_origin(auth.get("domain") or auth.get("issuer") or "")
     issuer = _token_issuer_origin(token)
     if not any(o in ALLOWED_ORIGINS for o in (domain, issuer) if o):

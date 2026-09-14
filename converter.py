@@ -1630,7 +1630,7 @@ async def admin_add_credential(request: Request,
     import_dir = Path(os.environ.get("CODEBUDDY_IMPORT_DIR") or dst_dir / "imports")
     try:
         name, content = read_import_file(import_dir, body.get("path"))
-        cred_data = json.loads(content.decode("utf-8"))
+        cred_data = auth_oauth.loads_strict(content.decode("utf-8"))
         src_uid, verr = auth_oauth.validate_cred_data(cred_data)
         if verr:
             raise CredentialFileError("凭据格式或站点校验失败")

@@ -336,7 +336,7 @@ def install_admin(app, config, gateway):
             directory = gateway.managed_auth_dir().resolve()
             for name, content in prepared:
                 try:
-                    data = json.loads(content)
+                    data = auth_oauth.loads_strict(content)  # 严格解析：拒绝 NaN/Infinity 常量
                     uid, invalid = auth_oauth.validate_cred_data(data)
                     if invalid or not isinstance(data.get("account") or {}, dict) or type(data["auth"].get("expiresAt", 0)) not in (int, float):
                         raise CredentialFileError("凭据格式无效")
