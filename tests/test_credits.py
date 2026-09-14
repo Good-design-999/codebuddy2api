@@ -651,6 +651,31 @@ def test_sync_usage_keeps_per_account_snapshots_on_failure():
         credits.fetch_request_usage = fake_fetch
         converter.CONFIG.update(usage_daily=None, usage_daily_accounts=None, control_store=None)
         try:
+            from fastapi.testclient import TestClient
+
+            def check_billing_stale(names):
+                with patch.dict(converter.CONFIG, {"api_key": "", "ledger": None}), \
+                        TestClient(converter.app) as client:
+                    sub = client.get("/v1/dashboard/billing/subscription")
+                    usage = client.get("/v1/dashboard/billing/usage")
+                assert sub.status_code == usage.status_code == 200
+                assert sub.json()["codebuddy_partial"] is bool(names)
+                assert sub.json().get("codebuddy_stale_accounts", []) == names
+                assert usage.json().get("partial", False) is bool(names)
+                assert usage.json().get("stale_accounts", []) == names
+
+            failing.update(snapshots)
+            for previous in (None, {"total_credits": 999, "fetched_at": 123, "partial": False}):
+                converter.CONFIG["usage_daily"] = previous
+                converter._sync_usage(pool)
+                view = converter.CONFIG["usage_daily"]
+                assert view["by_day"] == view["groups"] == {}
+                assert view["total_credits"] == view["requests"] == view["fetched_at"] == 0
+                assert view["partial"] is True and view["stale_accounts"] == ["u1.info", "u2.info"]
+                check_billing_stale(["u1.info", "u2.info"])
+                assert converter._billing_totals()["used_source"] == "quota_delta"
+            failing.clear()
+
             # 首轮即有账号失败且无任何历史快照：也必须标 stale/partial，不能装作精确
             failing.add("token-u2")
             converter._sync_usage(pool)
@@ -663,6 +688,15 @@ def test_sync_usage_keeps_per_account_snapshots_on_failure():
             view = converter.CONFIG["usage_daily"]
             assert view["total_credits"] == 30.0 and view["requests"] == 3
             assert view["partial"] is False and "stale_accounts" not in view
+
+            failing.update(snapshots)
+            last_good = dict(view)
+            converter._sync_usage(pool)
+            view = converter.CONFIG["usage_daily"]
+            for key in ("by_day", "groups", "total_credits", "requests", "fetched_at"):
+                assert view[key] == last_good[key]
+            check_billing_stale(["u1.info", "u2.info"])
+            failing.clear()
 
             failing.add("token-u2")
             converter._sync_usage(pool)
@@ -682,6 +716,16 @@ def test_sync_usage_keeps_per_account_snapshots_on_failure():
             converter._sync_usage(pool)
             view = converter.CONFIG["usage_daily"]
             assert view["total_credits"] == 10.0  # 凭证删除后其快照不再计入
+
+            with patch.object(converter.model_policy, "credential_enabled", return_value=False):
+                converter._sync_usage(pool)
+            assert converter.CONFIG["usage_daily"]["total_credits"] == 0
+            check_billing_stale([])
+            paths[0].unlink()
+            pool.prune()
+            converter._sync_usage(pool)
+            assert converter.CONFIG["usage_daily"]["groups"] == {}
+            check_billing_stale([])
         finally:
             credits.fetch_request_usage = orig_fetch
             converter.CONFIG["usage_daily"], converter.CONFIG["usage_daily_accounts"], \

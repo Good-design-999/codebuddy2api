@@ -1240,12 +1240,10 @@ def _publish_usage_daily(pool, stale=()):
     used, count = 0.0, 0
     partial = False
     newest = 0.0
-    included = False
     stale_out = []
     for cred_id, snap in accounts.items():
         if cred_id not in enabled:
             continue
-        included = True
         site = snap.get("site") or "domestic"
         group = groups.setdefault(site, {"by_day": {}, "total_credits": 0.0, "requests": 0})
         for day, models in (snap.get("by_day") or {}).items():
@@ -1266,8 +1264,7 @@ def _publish_usage_daily(pool, stale=()):
         if cred_id in enabled:
             partial = True
             stale_out.append(Path(cred_id).name)
-    if not included:
-        return  # 还没有任何成功快照：不覆盖已有视图
+    # 无成功快照也发布完整性标记；fetched_at=0 使账务继续使用额度差回退。
     for group in groups.values():
         group["total_credits"] = round(group["total_credits"], 2)
     out = {"by_day": by_day, "groups": groups, "total_credits": round(used, 2),
@@ -1276,7 +1273,7 @@ def _publish_usage_daily(pool, stale=()):
         out["stale_accounts"] = sorted(stale_out)
     CONFIG["usage_daily"] = out
     _log(f"[usage] 明细已同步: {count} 请求 / {used:.2f} credits"
-         + (f" | {len(stale_out)} 账号保留历史快照" if stale_out else ""))
+         + (f" | {len(stale_out)} 账号同步失败" if stale_out else ""))
 
 
 def _housekeep_once(pool: CredentialPool, ledger, *, pending_only=False):

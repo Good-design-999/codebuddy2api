@@ -145,6 +145,7 @@ Credential domain / token issuer determine the product identity. Chat and refres
 
 - Balances and usage are paginated in full; when a page cap is hit or an account's sync fails, responses carry `partial: true` (and `stale_accounts`) instead of pretending to be exact.
 - A failed account keeps its last good snapshot; HTTP 200 responses with a failing business code or missing structure are treated as errors and never overwrite history.
+- If every account fails before a first snapshot, both billing endpoints still report partial data and stale accounts; quota-delta fallback remains in use. Existing account snapshots retain their original fetch time on failures.
 - daily_costs are priced per site per day at that site's price, not at one blended average.
 
 ## Troubleshooting and retries
