@@ -56,10 +56,16 @@ def test_validate_cred_data():
     uid, err = validate_cred_data(bad)
     assert uid is None and "允许列表" in err
     # 时间戳必须有限且合理：NaN/Infinity/bool/0/超范围都拒绝
-    for bad_ts in (float("nan"), float("inf"), True, 0, -1, 99999999999999):
-        c = _cred()
-        c["auth"]["expiresAt"] = bad_ts
-        assert validate_cred_data(c)[1], bad_ts
+    for field in ("expiresAt", "lastRefreshTime"):
+        for bad_ts in (float("nan"), float("inf"), float("-inf"), True, 0, -1,
+                       4102444800000, 99999999999999, 10**1000, -(10**1000)):
+            c = _cred()
+            c["auth"][field] = bad_ts
+            assert validate_cred_data(c)[1], (field, bad_ts)
+        for valid_ts in (1, 1893456000000, 4102444799999, 1893456000000.5):
+            c = _cred()
+            c["auth"][field] = valid_ts
+            assert validate_cred_data(c) == ("u1", None)
     c = _cred()
     c["auth"]["expiresAt"] = 1893456000000  # 2030-01-01 毫秒
     assert validate_cred_data(c) == ("u1", None)

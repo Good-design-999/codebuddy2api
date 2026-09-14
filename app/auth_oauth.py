@@ -15,7 +15,6 @@ from __future__ import annotations
 import base64
 import copy
 import json
-import math
 import re
 import threading
 import time
@@ -99,9 +98,9 @@ def validate_cred_data(data) -> tuple[str | None, str | None]:
         value = auth.get(field)
         if value is None:
             continue
-        # bool 是 int 子类必须显式排除；NaN/Infinity 会让到期判断与 JSON 序列化行为异常
+        # 原值范围比较同时拒绝非有限浮点数，避免超大整数转 float 溢出。
         if isinstance(value, bool) or not isinstance(value, (int, float)) \
-                or not math.isfinite(value) or not 0 < float(value) < 4102444800000:  # 上限 2100-01-01
+                or not 0 < value < 4102444800000:  # 上限 2100-01-01
             return None, f"{field} 必须是合理范围内的有限毫秒时间戳"
     domain = _normalize_origin(auth.get("domain") or auth.get("issuer") or "")
     issuer = _token_issuer_origin(token)
