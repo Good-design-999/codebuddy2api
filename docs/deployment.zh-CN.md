@@ -49,16 +49,29 @@ docker compose up -d --no-build
 
 ```bash
 uv venv
-uv pip install -r requirements.txt
+uv pip install --require-hashes --only-binary=:all: -r requirements.txt
 (cd web && vp install --frozen-lockfile && vp build)
 uv run --env-file .env converter.py --desensitize
 ```
 
 先按上文配置 `.env`，再启动服务并进入 `/dashboard` 添加账号。更改前端源码后需重新构建 WebUI。
 
-不使用 uv 时，可执行 `python3 -m venv .venv`，激活环境后用 `pip install -r requirements.txt` 安装依赖，将运行命令换为 `python3 converter.py --desensitize`。**普通 Python 不自动读取 `.env`**，须显式导出环境变量或传入 CLI 参数。
+不使用 uv 时，可执行 `python3 -m venv .venv`，激活环境后用 `pip install --require-hashes --only-binary=:all: -r requirements.txt` 安装依赖，将运行命令换为 `python3 converter.py --desensitize`。**普通 Python 不自动读取 `.env`**，须显式导出环境变量或传入 CLI 参数。
 
 本地 Python 的监听地址和端口由 `--host`、`--port` 控制；Compose 专用的 `CODEBUDDY2API_BIND`、`CODEBUDDY2API_PORT`、`CODEBUDDY2API_AUTH_PATH` 不改变本地监听和数据目录。
+
+## 依赖锁定
+
+`requirements.in` 维护直接依赖；安装使用已提交、带哈希的 `requirements.txt`。用 uv 重新生成：
+
+```bash
+uv pip compile --universal --python-version 3.12 --no-python-downloads --generate-hashes requirements.in -o requirements.txt
+```
+
+默认沿用已有固定版本；有意升级时再用 `--upgrade-package NAME`，并审阅锁文件差异。安装要求匹配的二进制 wheel 和哈希；失败时修正锁文件或回退，不关闭检查。
+
+Docker 构建前端、Node 和 Python 镜像按多架构 digest 固定。更新时保留 `linux/amd64`、`linux/arm64` 并验证构建。锁定防止漂移，不代替后续安全更新。
+
 
 ## 命令行登录
 

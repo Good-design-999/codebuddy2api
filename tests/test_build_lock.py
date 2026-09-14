@@ -1,0 +1,75 @@
+"""Offline contracts for dependency hashes and immutable Docker inputs."""
+
+from pathlib import Path
+import re
+import shlex
+import unittest
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def requirement_lines(path):
+    for line in path.read_text().replace("\\\n", " ").splitlines():
+        if line.strip() and not line.lstrip().startswith("#"):
+            yield line.strip()
+
+
+class BuildLockTests(unittest.TestCase):
+    def test_every_resolved_dependency_has_an_exact_version_and_sha256(self):
+        locked = set()
+        for line in requirement_lines(ROOT / "requirements.txt"):
+            requirement, *hashes = re.split(r"\s+--hash=", line)
+            parsed = Requirement(requirement)
+            with self.subTest(package=parsed.name):
+                self.assertIsNone(parsed.url)
+                pins = list(parsed.specifier)
+                self.assertEqual(len(pins), 1)
+                self.assertEqual(pins[0].operator, "==")
+                self.assertNotIn("*", pins[0].version)
+                self.assertTrue(hashes)
+                for digest in hashes:
+                    self.assertRegex(digest.strip(), r"^sha256:[0-9a-f]{64}$")
+                locked.add(canonicalize_name(parsed.name))
+        direct = {canonicalize_name(Requirement(line).name)
+                  for line in requirement_lines(ROOT / "requirements.in")}
+        self.assertTrue(direct)
+        self.assertTrue(direct <= locked)
+
+    def test_external_images_and_build_frontend_are_pinned(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        self.assertRegex(dockerfile.splitlines()[0], r"^# syntax=docker/dockerfile:[^@]+@sha256:[0-9a-f]{64}$")
+        stages = set()
+        external = []
+        for line in dockerfile.splitlines():
+            parts = shlex.split(line)
+            if not parts or parts[0] != "FROM":
+                continue
+            image = next(part for part in parts[1:] if not part.startswith("--"))
+            if "${BUILDARCH}" in image:
+                for arch in ("amd64", "arm64"):
+                    self.assertIn(image.replace("${BUILDARCH}", arch), stages)
+            elif image != "scratch" and image not in stages:
+                self.assertRegex(image, r"@sha256:[0-9a-f]{64}$")
+                external.append(image)
+            if "AS" in parts:
+                stages.add(parts[parts.index("AS") + 1])
+        self.assertTrue(any(image.startswith("node:") for image in external))
+        self.assertTrue(any(image.startswith("python:") for image in external))
+
+    def test_ci_and_container_installs_require_verified_wheels(self):
+        installs = []
+        for path in (ROOT / "Dockerfile", ROOT / ".github/workflows/docker.yml"):
+            for line in path.read_text().splitlines():
+                if "install" in line and "-r requirements.txt" in line:
+                    installs.append(line)
+                    self.assertIn("--require-hashes", line)
+                    self.assertIn("--only-binary=:all:", line)
+        self.assertGreaterEqual(len(installs), 3)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
