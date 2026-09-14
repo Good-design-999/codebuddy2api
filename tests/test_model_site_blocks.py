@@ -2,7 +2,7 @@
 """(后端, 模型) 避让回归：官方回 11102「该站点无此模型」后不再反复派发，且能自动绕开/自愈。
 
 合成凭据 + 临时目录，不访问网络、不读取本机 auth/。
-运行：.venv/bin/python -B -m pytest -q tests/test_model_site_blocks.py
+运行：python -B tests/test_model_site_blocks.py
 """
 
 import json
@@ -242,5 +242,9 @@ class PoolRoutingTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    import pytest
-    sys.exit(pytest.main([__file__, "-q"]))
+    # CI 用 python -B 直接执行每个测试文件且不装 pytest：先跑模块级检查，再交给 unittest。
+    for fn in (test_parse_not_servable_reads_code_field,
+               test_parse_not_servable_ignores_other_errors,
+               test_parse_not_servable_reads_wrapped_error_object):
+        fn()
+    unittest.main(verbosity=2)
