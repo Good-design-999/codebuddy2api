@@ -150,7 +150,8 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
                     output = _convert_content_blocks(output)
                 result.append({"role": "tool", "tool_call_id": tc_id, "content": output})
         if user_blocks:
-            result.insert(0, {"role": "user", "content": _convert_content_blocks(user_blocks)})
+            # 工具结果必须紧随 assistant 的 tool_calls；普通文本排在它们之后
+            result.append({"role": "user", "content": _convert_content_blocks(user_blocks)})
         return result
 
     # assistant 角色

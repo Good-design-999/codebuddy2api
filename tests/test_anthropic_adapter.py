@@ -182,10 +182,12 @@ def test_tool_result_with_user_text():
     chat = anthropic_request_to_chat(req)
     msgs = chat["messages"]
 
-    assert msgs[0]["role"] == "user"
-    assert msgs[0]["content"] == "Continue."
-    assert msgs[1]["role"] == "tool"
-    assert msgs[1]["tool_call_id"] == "toolu_xyz"
+    # 工具结果必须先于普通 user 文本，保持 assistant(tool_calls) → tool 的相邻关系
+    assert msgs[0]["role"] == "tool"
+    assert msgs[0]["tool_call_id"] == "toolu_xyz"
+    assert msgs[0]["content"] == "output here"
+    assert msgs[1]["role"] == "user"
+    assert msgs[1]["content"] == "Continue."
     print("✅ test_tool_result_with_user_text")
 
 
