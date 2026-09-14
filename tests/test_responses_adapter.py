@@ -563,6 +563,32 @@ def test_nonstream_response():
     print("✅ test_nonstream_response")
 
 
+def test_finish_reason_maps_to_terminal_status():
+    """长度截断与内容过滤不得标记 completed：流式发 response.incomplete，非流式带 incomplete_details。"""
+    conv = ResponsesStreamConverter(model="glm-5.2")
+    conv.feed_line('data: {"id":"c2","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"c2","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}')
+    tail = conv.finish()
+    assert '"type": "response.incomplete"' in tail and '"type": "response.completed"' not in tail
+    resp = conv.get_nonstream_response()
+    assert resp["status"] == "incomplete"
+    assert resp["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert resp["output"][0]["status"] == "incomplete"
+
+    conv = ResponsesStreamConverter(model="glm-5.2")
+    conv.feed_line('data: {"id":"c3","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}')
+    resp = conv.get_nonstream_response()
+    assert resp["status"] == "incomplete" and resp["incomplete_details"]["reason"] == "content_filter"
+
+    conv = ResponsesStreamConverter(model="glm-5.2")
+    conv.feed_line('data: {"id":"c4","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}')
+    conv.feed_line('data: {"id":"c4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}')
+    assert '"type": "response.completed"' in conv.finish()
+    assert "incomplete_details" not in conv.get_nonstream_response()
+
+    print("✅ test_finish_reason_maps_to_terminal_status")
+
+
 if __name__ == "__main__":
     test_simple_text_request()
     test_array_input_request()
@@ -581,4 +607,5 @@ if __name__ == "__main__":
     test_stream_converter_text()
     test_stream_converter_function_call()
     test_nonstream_response()
-    print(f"\n🎉 All {17} tests passed!")
+    test_finish_reason_maps_to_terminal_status()
+    print(f"\n🎉 All {18} tests passed!")

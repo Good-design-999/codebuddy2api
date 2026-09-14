@@ -309,7 +309,8 @@ class ResponsesStreamConverter:
         return self._process_chunk(chunk)
 
     def finish(self) -> str:
-        """流结束后，发出收尾事件（done + completed）。"""
+        """流结束后，发出收尾事件（done + 终止状态）。"""
+        status, reason = self._final_status()
         events: list[str] = []
 
         # 关闭 reasoning item
@@ -318,7 +319,7 @@ class ResponsesStreamConverter:
                 "output_index": 0, "summary_index": 0, "text": self._reasoning
             }))
             events.append(self._evt("response.output_item.done", {
-                "output_index": 0, "item": self._reasoning_item("completed")
+                "output_index": 0, "item": self._reasoning_item(status)
             }))
 
         # 关闭 text content
@@ -334,7 +335,7 @@ class ResponsesStreamConverter:
         if self._emitted_msg_item:
             events.append(self._evt("response.output_item.done", {
                 "output_index": self._msg_idx(),
-                "item": self._msg_item("completed")
+                "item": self._msg_item(status)
             }))
 
         # 关闭 function calls
@@ -346,19 +347,30 @@ class ResponsesStreamConverter:
                     "output_index": oi, "arguments": tc["args"]
                 }))
                 events.append(self._evt("response.output_item.done", {
-                    "output_index": oi, "item": self._fc_item(tc, "completed")
+                    "output_index": oi, "item": self._fc_item(tc, status)
                 }))
 
-        # response.completed
-        events.append(self._evt("response.completed", {
-            "response": self._response_obj("completed")
+        # 终止事件：completed 或 incomplete（截断/过滤绝不伪装完成）
+        events.append(self._evt(f"response.{status}", {
+            "response": self._response_obj(status, incomplete_reason=reason)
         }))
         return "".join(events)
 
     def get_nonstream_response(self) -> dict:
         """流结束后获取完整的非流式 Response 对象。"""
-        return self._response_obj("completed")
+        status, reason = self._final_status()
+        return self._response_obj(status, incomplete_reason=reason)
 
+    def _final_status(self) -> tuple[str, str | None]:
+        """上游 finish_reason → (response status, incomplete reason)；截断/过滤不作 completed。"""
+        fr = self._finish_reason
+        if fr in (None, "stop", "tool_calls"):
+            return "completed", None
+        if fr == "length":
+            return "incomplete", "max_output_tokens"
+        if fr in ("content_filter", "content-filter", "refusal"):
+            return "incomplete", "content_filter"
+        return "incomplete", None
     # ---- 内部 ----
 
     def _process_chunk(self, chunk: dict) -> str:
@@ -501,7 +513,7 @@ class ResponsesStreamConverter:
             "status": status,
         }
 
-    def _response_obj(self, status: str) -> dict:
+    def _response_obj(self, status: str, incomplete_reason: str | None = None) -> dict:
         output = []
         if self._emitted_reasoning_item:
             output.append(self._reasoning_item(status))
@@ -524,7 +536,7 @@ class ResponsesStreamConverter:
                 "total_tokens": u.get("total_tokens", 0),
             }
 
-        return {
+        obj = {
             "id": self.resp_id,
             "object": "response",
             "created_at": self.created_at,
@@ -534,3 +546,7 @@ class ResponsesStreamConverter:
             "parallel_tool_calls": True,
             "usage": usage,
         }
+        if status == "incomplete":
+            # 客户端据 incomplete_details 决定续写/重试；未知原因保留 null reason。
+            obj["incomplete_details"] = {"reason": incomplete_reason}
+        return obj
