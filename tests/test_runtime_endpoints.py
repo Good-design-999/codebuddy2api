@@ -89,6 +89,24 @@ class EndpointTests(unittest.TestCase):
                 self.assertEqual(error["param"], field)
                 self.assertEqual(len(self.requests), 0)
 
+    def test_multiple_candidates_are_rejected_before_reaching_upstream(self):
+        """聚合路径无法保持多候选独立：n 只能缺省或恰为 1。"""
+        for n in (2, 0, "2", True, 1.5):
+            with self.subTest(n=n):
+                self.requests.clear()
+                response = self.client.post("/v1/chat/completions", json={
+                    "model": "auto", "messages": [{"role": "user", "content": "hi"}], "n": n})
+                self.assertEqual(response.status_code, 400, response.text)
+                body = response.json()
+                error = body.get("error") or body["detail"]["error"]
+                self.assertEqual(error["param"], "n")
+                self.assertEqual(len(self.requests), 0)
+        self.requests.clear()
+        response = self.client.post("/v1/chat/completions", json={
+            "model": "auto", "messages": [{"role": "user", "content": "hi"}], "n": 1})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(self.requests), 1)
+
     def test_tool_metadata_policy_reaches_all_protocols(self):
         description = "Read sandbox data without destructive changes."
         schema = {"type": "object", "title": "Lookup inputs", "properties": {
