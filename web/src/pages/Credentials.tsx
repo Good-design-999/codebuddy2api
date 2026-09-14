@@ -23,6 +23,7 @@ import {
   ResourceState,
 } from "../components";
 import { prepareImports, type ImportResult } from "../imports";
+import { downloadFilename } from "../downloads";
 import s from "../ui.module.scss";
 function expiry(value: unknown, milliseconds = false) {
   return typeof value === "number"
@@ -505,13 +506,10 @@ export function Credentials() {
                   const link = document.createElement("a");
                   link.href = url;
                   const header = String(response.headers["content-disposition"] ?? "");
-                  const filename = /filename="?([^";]+)"?/.exec(header)?.[1];
-                  link.download =
-                    filename && !/[\\/]/.test(filename)
-                      ? filename
-                      : liveSelected.length === 1
-                        ? "credential.info"
-                        : "credentials.zip";
+                  link.download = downloadFilename(
+                    header,
+                    liveSelected.length === 1 ? "credential.info" : "credentials.zip",
+                  );
                   link.click();
                   setTimeout(() => URL.revokeObjectURL(url), 1000);
                   setDrawer(null);
