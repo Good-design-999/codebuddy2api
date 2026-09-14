@@ -2073,6 +2073,16 @@ def current_model_details(region: str | None = None) -> list[dict]:
     return list(details.values())
 
 
+def _client_wants_stream(payload: dict) -> bool:
+    """stream 缺省为 False（OpenAI/Anthropic 协议默认非流式）；非布尔类型显式 400。
+    目标客户端（Codex CLI / Claude Code）均显式发送 stream:true，不受影响。"""
+    value = payload.get("stream", False)
+    if not isinstance(value, bool):
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": "stream must be a boolean", "type": "invalid_request_error", "param": "stream"}})
+    return value
+
+
 def _prepare_payload(payload, field="messages") -> dict:
     """先处理整次请求的图片，再进行适配、日志记录和凭证选取。"""
     if not isinstance(payload, dict):
@@ -2217,7 +2227,7 @@ async def chat_completions(request: Request,
         raise HTTPException(status_code=400, detail={"error": {"message": "messages is required", "type": "invalid_request_error"}})
 
     # 构造后端 body：只透传已知的合法字段
-    client_wants_stream = bool(payload.get("stream"))
+    client_wants_stream = _client_wants_stream(payload)
     body = {k: payload[k] for k in PASSTHROUGH_BODY_KEYS if k in payload}
     body = _prepare_chat_body(body)
 
@@ -2641,7 +2651,7 @@ async def create_response(request: Request,
         chat_body, keep_tool_metadata=CONFIG.get("keep_tool_metadata", False))
     chat_body = _prepare_chat_body(chat_body)
 
-    client_wants_stream = payload.get("stream", True)  # Codex CLI 默认 stream
+    client_wants_stream = _client_wants_stream(payload)
     model_name = payload.get("model", "auto")
     rid = os.urandom(4).hex()
     _log(f"[{rid}] ▶ RESPONSES {model_name} | stream={client_wants_stream} | input_items={len(payload.get('input', []))}")
@@ -2754,7 +2764,7 @@ async def create_message(request: Request,
     _log_json(f"[{rid}] ANTHROPIC → CHAT BODY (预览)", chat_body)
     t0 = time.time()
 
-    if not payload.get("stream", True):
+    if not _client_wants_stream(payload):
         return await _nonstream_adapted(url, headers, chat_body, model_name, t0, rid, cred, anthropic=True)
 
     return StreamingResponse(

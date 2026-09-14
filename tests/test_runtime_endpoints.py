@@ -166,6 +166,28 @@ class EndpointTests(unittest.TestCase):
         finally:
             converter.CONFIG["api_key"] = ""
 
+    def test_omitted_stream_defaults_to_nonstream_and_bad_type_rejected(self):
+        """省略 stream 按协议默认非流式返回完整 JSON；非布尔 stream 显式 400。"""
+        bodies = {
+            "/v1/chat/completions": {"model": "auto", "messages": [{"role": "user", "content": "hi"}]},
+            "/v1/responses": {"model": "auto", "input": [{"role": "user", "content": "hi"}]},
+            "/v1/messages": {"model": "auto", "max_tokens": 64,
+                             "messages": [{"role": "user", "content": "hi"}]},
+        }
+        for route, body in bodies.items():
+            with self.subTest(route=route):
+                self.requests.clear()
+                response = self.client.post(route, json=body)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.headers["content-type"], "application/json")
+                self.assertNotIn("data:", response.text)
+                response = self.client.post(route, json={**body, "stream": "true"})
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["error"]["param"], "stream")
+                response = self.client.post(route, json={**body, "stream": False})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.headers["content-type"], "application/json")
+
     def test_tool_metadata_policy_reaches_all_protocols(self):
         description = "Read sandbox data without destructive changes."
         schema = {"type": "object", "title": "Lookup inputs", "properties": {
