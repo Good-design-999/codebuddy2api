@@ -752,6 +752,31 @@ class ConcurrencyLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[0]["status"], 200)
 
 
+class AuxiliaryCapacityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_saturated_generation_gate_does_not_block_token_counting(self):
+        from app.inbound_limits import ConcurrencyLimitMiddleware
+
+        middleware = ConcurrencyLimitMiddleware(converter.app, {"max_concurrent": 1})
+        gate = middleware._gate()
+        await gate.acquire()
+        try:
+            with patch.dict(converter.CONFIG, {"api_key": ""}):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=middleware),
+                                             base_url="http://test") as client:
+                    response = await client.post("/v1/messages/count_tokens", json={
+                        "model": "auto", "messages": [{"role": "user", "content": "hello"}]})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertGreater(response.json()["input_tokens"], 0)
+                    unknown = await client.post("/v1/messages/unknown", json={})
+                    self.assertEqual(unknown.status_code, 404)
+                    wrong_method = await client.get("/v1/messages")
+                    self.assertEqual(wrong_method.status_code, 405)
+            self.assertTrue(gate.locked())
+        finally:
+            gate.release()
+
+
+
 class ConfigurationTests(unittest.TestCase):
     def configure(self, env=None, flags=(), invalid=False):
         with contextlib.ExitStack() as stack:

@@ -41,7 +41,7 @@ class ConcurrencyLimitMiddleware:
 
     async def __call__(self, scope, receive, send):
         if (scope["type"] != "http" or scope.get("method") != "POST"
-                or not scope.get("path", "").startswith(_GATED_PATHS)):
+                or scope.get("path", "") not in _GATED_PATHS):
             return await self.app(scope, receive, send)
         limit = self._limit()
         if limit <= 0:
