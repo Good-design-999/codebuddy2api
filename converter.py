@@ -1850,17 +1850,27 @@ def billing_usage(start_date: Optional[str] = None, end_date: Optional[str] = No
     """OpenAI 用量端点：total_usage 单位美分；daily_costs 为官方明细按天×模型聚合（最近 30 天）。"""
     _check_auth(authorization, x_api_key)
     t = _billing_totals()
-    # 每 Credit 美分单价：按各站实际用量加权（保证 Σdaily 与 total_usage 一致）
-    cents_per_credit = ((t["used_usd"] * 100 / t["used"]) if t["used"]
-                        else t["price_cny"] / t["rate"] * 100)
+    # 逐站逐日按本站单价折算后再合并：两站单价不同，统一平均价会让每天/每模型的金额失真。
+    # Σdaily 与 total_usage 都由同一组分站用量算出，恒等关系保持不变。
+    cents = {"domestic": t["price_cny"] / t["rate"] * 100, "international": t["price_usd"] * 100}
+    detail = CONFIG.get("usage_daily") or {}
+    priced: dict = {}
+    for site, group in (detail.get("groups") or {}).items():
+        unit = cents.get(site)
+        if unit is None:
+            continue
+        for day, models in (group.get("by_day") or {}).items():
+            slot = priced.setdefault(day, {})
+            for model, credit in models.items():
+                slot[model] = slot.get(model, 0.0) + float(credit) * unit
     daily = []
-    for day in sorted(t["by_day"]):
+    for day in sorted(priced):
         if start_date and day < start_date:
             continue
         if end_date and day > end_date:
             continue
-        items = [{"name": m, "cost": round(c * cents_per_credit, 4)}
-                 for m, c in sorted(t["by_day"][day].items()) if c > 0]
+        items = [{"name": m, "cost": round(c, 4)}
+                 for m, c in sorted(priced[day].items()) if c > 0]
         try:
             ts = int(time.mktime(time.strptime(day, "%Y-%m-%d")))
         except ValueError:
@@ -1870,7 +1880,12 @@ def billing_usage(start_date: Optional[str] = None, end_date: Optional[str] = No
         total_cents = round(sum(sum(i["cost"] for i in d["line_items"]) for d in daily), 2)
     else:                      # 全量口径与 subscription 构成余额恒等式
         total_cents = round(t["used_usd"] * 100, 2)
-    return {"object": "list", "total_usage": total_cents, "daily_costs": daily}
+    out = {"object": "list", "total_usage": total_cents, "daily_costs": daily}
+    if t.get("partial"):
+        out["partial"] = True
+    if detail.get("stale_accounts"):
+        out["stale_accounts"] = detail["stale_accounts"]
+    return out
 
 
 # 对外模型表：云端 /v3/config 同步结果优先，DEFAULT_MODELS 兜底补充

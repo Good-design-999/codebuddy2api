@@ -740,6 +740,10 @@ def test_billing_balance_identity():
             # 区间过滤只统计窗口内明细
             converter.CONFIG["usage_daily"] = {"by_day": {"2026-09-01": {"glm-5.3": 200.0},
                                                           "2026-09-05": {"glm-5.3": 50.0}},
+                                               "groups": {"domestic": {"by_day": {
+                                                   "2026-09-01": {"glm-5.3": 200.0},
+                                                   "2026-09-05": {"glm-5.3": 50.0}},
+                                                   "total_credits": 250.0, "requests": 3}},
                                                "total_credits": 250.0, "requests": 3,
                                                "fetched_at": time.time()}
             filtered = converter.billing_usage("2026-09-04", "2026-09-30", None, None)
@@ -749,6 +753,42 @@ def test_billing_balance_identity():
             converter.CONFIG["ledger"] = saved_led
             converter.CONFIG["usage_daily"] = saved_usage
     print("✅ test_billing_balance_identity")
+
+
+def test_billing_usage_prices_each_day_by_site():
+    """两站单价不同且用量发生在不同天：逐日金额必须按本站单价，而不是全局平均价。"""
+    import converter
+    with tempfile.TemporaryDirectory() as td:
+        led = credits.CreditLedger(Path(td) / "ledger.json")
+        led.update_credits("cn", {"credits": 100.0, "segments": [
+            {"remaining": 100.0, "total": 200.0, "expires_at": None}], "intl": False})
+        led.update_credits("ai", {"credits": 100.0, "segments": [
+            {"remaining": 100.0, "total": 200.0, "expires_at": None}], "intl": True})
+        saved = (converter.CONFIG.get("ledger"), converter.CONFIG.get("usage_daily"))
+        try:
+            converter.CONFIG["ledger"] = led
+            # 国内 100 credits @ $0.014/7.15 在 09-01；国际 100 credits @ $0.03 在 09-02
+            converter.CONFIG["usage_daily"] = {
+                "by_day": {"2026-09-01": {"m": 100.0}, "2026-09-02": {"m": 100.0}},
+                "groups": {"domestic": {"by_day": {"2026-09-01": {"m": 100.0}},
+                                        "total_credits": 100.0, "requests": 1},
+                           "international": {"by_day": {"2026-09-02": {"m": 100.0}},
+                                             "total_credits": 100.0, "requests": 1}},
+                "total_credits": 200.0, "requests": 2, "fetched_at": time.time()}
+            usage = converter.billing_usage(None, None, None, None)
+            days = {d["timestamp"]: d["line_items"] for d in usage["daily_costs"]}
+            import time as _t
+            d1 = _t.mktime(_t.strptime("2026-09-01", "%Y-%m-%d"))
+            d2 = _t.mktime(_t.strptime("2026-09-02", "%Y-%m-%d"))
+            cn_cents = 100 * 0.014 / 7.15 * 100   # ≈ 19.58 美分
+            assert abs(days[d1][0]["cost"] - cn_cents) < 0.01, days[d1]
+            assert abs(days[d2][0]["cost"] - 300.0) < 0.01, days[d2]  # 100 × $0.03 = 300 美分
+            # 恒等式：Σdaily ≈ total_usage（全量口径取 used_usd）
+            assert abs(sum(i["cost"] for d in usage["daily_costs"] for i in d["line_items"])
+                       - usage["total_usage"]) < 0.02
+        finally:
+            converter.CONFIG["ledger"], converter.CONFIG["usage_daily"] = saved
+    print("✅ test_billing_usage_prices_each_day_by_site")
 
 
 def test_billing_intl_split():
@@ -892,6 +932,7 @@ if __name__ == "__main__":
     test_fetch_request_usage_marks_partial_at_page_cap()
     test_fetch_request_usage_paging()
     test_billing_balance_identity()
+    test_billing_usage_prices_each_day_by_site()
     test_billing_intl_split()
     test_current_models_intl_condition()
     test_guard_model()
