@@ -27,6 +27,30 @@ def _rand_id(prefix: str = "resp_") -> str:
 # 请求转换：Responses → Chat
 # ---------------------------------------------------------------------------
 
+def _text_format_to_response_format(fmt) -> dict | None:
+    """Responses text.format → Chat response_format；只转换语义等价的形态，其余显式报错。"""
+    if fmt is None:
+        return None
+    if not isinstance(fmt, dict):
+        raise ValueError("text.format must be an object")
+    kind = fmt.get("type")
+    if kind in (None, "text"):
+        return None
+    if kind == "json_object":
+        return {"type": "json_object"}
+    if kind == "json_schema":
+        schema = fmt.get("schema")
+        if not isinstance(schema, dict):
+            raise ValueError("text.format json_schema requires a schema object")
+        js: dict[str, Any] = {"name": fmt.get("name") or "response", "schema": schema}
+        if "strict" in fmt:
+            js["strict"] = bool(fmt["strict"])
+        if isinstance(fmt.get("description"), str):
+            js["description"] = fmt["description"]
+        return {"type": "json_schema", "json_schema": js}
+    raise ValueError(f"unsupported text.format type: {kind}")
+
+
 def responses_request_to_chat(body: dict) -> dict:
     """将 Responses API 请求体转换为 Chat Completions 请求体。
 
@@ -71,6 +95,17 @@ def responses_request_to_chat(body: dict) -> dict:
         if key in body:
             chat[key] = body[key]
 
+    # 正式嵌套字段 → Chat 顶层等价物；显式顶层字段优先
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict) and "reasoning_effort" not in chat:
+        effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort.strip():
+            chat["reasoning_effort"] = effort
+    text = body.get("text")
+    if isinstance(text, dict) and "response_format" not in chat:
+        mapped = _text_format_to_response_format(text.get("format"))
+        if mapped is not None:
+            chat["response_format"] = mapped
     # max_output_tokens → max_tokens
     if "max_output_tokens" in body:
         chat["max_tokens"] = body["max_output_tokens"]

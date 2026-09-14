@@ -633,6 +633,37 @@ def test_usage_maps_cached_tokens_and_omits_when_unknown():
     print("✅ test_usage_maps_cached_tokens_and_omits_when_unknown")
 
 
+def test_reasoning_effort_and_text_format_are_mapped():
+    """reasoning.effort / text.format 进入上游请求；顶层字段优先；不支持的 format 显式报错。"""
+    chat = responses_request_to_chat({"input": "hi", "reasoning": {"effort": "high"},
+                                      "text": {"format": {"type": "json_object"}}})
+    assert chat["reasoning_effort"] == "high"
+    assert chat["response_format"] == {"type": "json_object"}
+
+    chat = responses_request_to_chat({"input": "hi", "reasoning_effort": "low",
+                                      "reasoning": {"effort": "high"}})
+    assert chat["reasoning_effort"] == "low"  # 顶层显式字段优先
+
+    chat = responses_request_to_chat({"input": "hi", "text": {"format": {
+        "type": "json_schema", "name": "answer", "strict": True,
+        "schema": {"type": "object", "properties": {"a": {"type": "integer"}}}}}})
+    fmt = chat["response_format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["json_schema"]["name"] == "answer" and fmt["json_schema"]["strict"] is True
+    assert fmt["json_schema"]["schema"]["properties"]["a"]["type"] == "integer"
+
+    chat = responses_request_to_chat({"input": "hi", "text": {"format": {"type": "text"}}})
+    assert "response_format" not in chat
+
+    try:
+        responses_request_to_chat({"input": "hi", "text": {"format": {"type": "xml"}}})
+        raise AssertionError("unsupported text.format must raise")
+    except ValueError:
+        pass
+
+    print("✅ test_reasoning_effort_and_text_format_are_mapped")
+
+
 if __name__ == "__main__":
     test_simple_text_request()
     test_array_input_request()
@@ -654,4 +685,5 @@ if __name__ == "__main__":
     test_finish_reason_maps_to_terminal_status()
     test_stream_events_carry_sequence_and_item_ids()
     test_usage_maps_cached_tokens_and_omits_when_unknown()
-    print(f"\n🎉 All {20} tests passed!")
+    test_reasoning_effort_and_text_format_are_mapped()
+    print(f"\n🎉 All {21} tests passed!")
