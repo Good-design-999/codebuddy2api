@@ -102,7 +102,7 @@ class InboundBodyLimitMiddleware:
         async def replay():
             nonlocal replayed
             if replayed:
-                return {"type": "http.disconnect"}
+                return await receive()  # 请求体结束不等于断连，继续监听真实连接。
             replayed = True
             return {"type": "http.request", "body": buffered, "more_body": False}
 

@@ -635,6 +635,70 @@ class InboundBodyLimitTests(unittest.TestCase):
         self.assertEqual(sent[0]["status"], 413)
 
 
+class InboundStreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def exercise_stream(self, path, disconnect=False):
+        from app.inbound_limits import ConcurrencyLimitMiddleware, InboundBodyLimitMiddleware
+        from starlette.responses import StreamingResponse
+
+        disconnected = asyncio.Event()
+        closed = asyncio.Event()
+        chunks = [{"type": "http.request", "body": b"{", "more_body": True},
+                  {"type": "http.request", "body": b"}", "more_body": False}]
+        sent = []
+
+        async def receive():
+            if chunks:
+                return chunks.pop(0)
+            await disconnected.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+            if disconnect and message["type"] == "http.response.body" and message.get("body"):
+                disconnected.set()
+
+        async def stream():
+            try:
+                yield b"data: first\n\n"
+                if disconnect:
+                    await asyncio.Event().wait()
+                else:
+                    await asyncio.sleep(0)
+                    yield b"data: [DONE]\n\n"
+            finally:
+                closed.set()
+
+        async def app(scope, receive, send):
+            request = await receive()
+            self.assertEqual(request["body"], b"{}")
+            self.assertFalse(request["more_body"])
+            await StreamingResponse(stream(), media_type="text/event-stream")(scope, receive, send)
+
+        config = {"max_inbound_bytes": 1024, "max_concurrent": 1}
+        middleware = ConcurrencyLimitMiddleware(InboundBodyLimitMiddleware(app, config), config)
+        scope = {"type": "http", "method": "POST", "path": path,
+                 "asgi": {"version": "3.0", "spec_version": "2.3"}}
+        await asyncio.wait_for(middleware(scope, receive, send), 2)
+        self.assertTrue(closed.is_set())
+        self.assertFalse(middleware._gate().locked())
+        body = b"".join(m.get("body", b"") for m in sent)
+        self.assertIn(b"data: first", body)
+        if disconnect:
+            self.assertNotIn(b"[DONE]", body)
+        else:
+            self.assertIn(b"[DONE]", body)
+            self.assertFalse(sent[-1].get("more_body", False))
+
+    async def test_buffered_requests_keep_streaming_until_completion(self):
+        for path in ROUTES:
+            with self.subTest(path=path):
+                await self.exercise_stream(path)
+
+    async def test_real_disconnect_closes_the_stream_and_releases_capacity(self):
+        await self.exercise_stream("/v1/messages", disconnect=True)
+
+
+
 class ConcurrencyLimitTests(unittest.IsolatedAsyncioTestCase):
     """并发上限：名额占满立即 503（含 Retry-After），释放后恢复。"""
 
