@@ -2597,6 +2597,11 @@ async def _fetch_checked_chat(url, headers, body, model_name, rid, cred=None, *,
         # 审核拒绝不是工具损坏，不因 required 工具选择而重复生成。
         budget = CONFIG.get("tool_call_max_retry", _TOOL_CALL_MAX_RETRY)
         if detector.detected or not body.get("tools") or tool_attempt >= budget:
+            if not detector.detected and body.get("tools"):
+                # 耗尽预算的末次生成同样消耗额度：记入 attempts 再报错
+                exhausted = result.get("usage") or {}
+                observe_attempt("tool_args_exhausted", attempt=tool_attempt, max_attempts=budget,
+                                total_tokens=exhausted.get("total_tokens"))
             raise UpstreamResponseError(502, b"Invalid upstream tool_calls after retries")
         tool_attempt += 1
         # 被丢弃的这次生成也是真实消耗：连同序号记进 attempts，账务不再只看见最后一次

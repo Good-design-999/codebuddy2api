@@ -60,7 +60,7 @@ def safe_attempt(value: Any) -> dict:
         clean = safe_label(value.get(key))
         if clean is not None:
             result[key] = clean
-    for key in ("status_code", "duration_ms", "attempt", "retry_after"):
+    for key in ("status_code", "duration_ms", "attempt", "retry_after", "max_attempts", "total_tokens"):
         clean = number(value.get(key))
         if clean is not None:
             result[key] = clean

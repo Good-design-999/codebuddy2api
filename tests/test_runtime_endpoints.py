@@ -232,6 +232,10 @@ class EndpointTests(unittest.TestCase):
                 response = self.client.post(ROUTES[0], json=nonstream)
                 self.assertEqual(response.status_code, 502, response.text)
                 self.assertEqual(len(self.requests), 1)  # 预算 0：不重试
+                # 耗尽预算的末次生成也必须带着用量出现在 attempts 里
+                exhausted = [kw for stage, kw in attempts if stage == "tool_args_exhausted"]
+                self.assertEqual(len(exhausted), 1)
+                self.assertIn("total_tokens", exhausted[0])
             finally:
                 converter.CONFIG["tool_call_max_retry"] = 3
 
