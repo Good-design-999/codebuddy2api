@@ -756,6 +756,7 @@ def test_billing_balance_identity():
             # 端点级恒等式：客户端按 hard_limit_usd − total_usage/100 算出的正是真实剩余
             sub = converter.billing_subscription(None, None)
             usage = converter.billing_usage(None, None, None, None)
+            assert sub["codebuddy_partial"] is False  # 数据完整时显式 False
             assert abs(sub["hard_limit_usd"] - usage["total_usage"] / 100 - t["remaining_usd"]) < 0.01
             assert sub["codebuddy_credits_remaining"] == 1000.0
             assert sub["plan"]["title"].startswith("CodeBuddy Credits")

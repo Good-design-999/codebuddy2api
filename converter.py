@@ -1846,6 +1846,9 @@ def billing_subscription(authorization: Optional[str] = Header(default=None),
         "codebuddy_balance_usd": t["remaining_usd"],
         "codebuddy_balance_cny": t["remaining_cny"],
         "codebuddy_sites": t["groups"],
+        # 余额/用量不完整（分页到顶或账号同步失败）时调用方必须能看到
+        "codebuddy_partial": t["partial"],
+        **({"codebuddy_stale_accounts": stale} if (stale := (CONFIG.get("usage_daily") or {}).get("stale_accounts")) else {}),
     }
 
 
