@@ -502,6 +502,69 @@ def test_aggregate_credits():
     print("✅ test_aggregate_credits")
 
 
+def _fake_client(pages, seen=None):
+    """按 pageNum 返回预置响应的 httpx.Client 替身。"""
+    class FakeResp:
+        status_code = 200
+        def __init__(self, payload):
+            self._p = payload
+        def json(self):
+            return self._p
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def post(self, url, headers=None, json=None, timeout=None):
+            if seen is not None:
+                seen.append(json.get("pageNum", json.get("PageNumber")))
+            return FakeResp(pages[min((json.get("pageNum") or json.get("PageNumber")) - 1, len(pages) - 1)])
+    return FakeClient
+
+
+def _with_client(fake, fn):
+    orig = credits.httpx.Client
+    credits.httpx.Client = fake
+    try:
+        return fn()
+    finally:
+        credits.httpx.Client = orig
+
+
+def test_fetch_request_usage_rejects_invalid_success_payloads():
+    """HTTP 200 但业务码失败或结构缺失：必须报错，不能当作零用量。"""
+    token = _jwt("https://www.codebuddy.cn/x")
+    for pages in ([{"code": 1059, "msg": "rate limited", "data": {"total": 0, "data": []}}],
+                  [{"code": 0, "data": {}}],                      # 缺 data.data/total
+                  [{"data": {"data": [], "total": 0}}],           # code 缺失但结构完整 → 合法空
+                  ):
+        try:
+            result = _with_client(_fake_client(pages),
+                                  lambda: credits.fetch_request_usage(token))
+        except RuntimeError:
+            assert pages[0].get("code") not in (0, None) or "data" not in pages[0].get("data", {}) \
+                or "data" not in pages[0]["data"]
+        else:
+            assert pages[0].get("code") is None and result["requests"] == 0  # 合法空结果照旧可用
+    print("✅ test_fetch_request_usage_rejects_invalid_success_payloads")
+
+
+def test_fetch_credits_distinguishes_empty_from_missing_structure():
+    """Accounts 键存在但为空 = 合法零余额；结构整体缺失 = 报错，不得覆盖缓存为零。"""
+    token = _jwt("https://www.codebuddy.cn/x")
+    empty = _with_client(_fake_client([{"code": 0, "data": {"Response": {"Data": {"Accounts": []}}}}]),
+                         lambda: credits.fetch_credits(token))
+    assert empty["credits"] == 0.0 and empty["count"] == 0
+    for bad in ({"code": 0, "data": {}}, {"code": 0, "data": {"Response": {"Data": {}}}}):
+        try:
+            _with_client(_fake_client([bad]), lambda: credits.fetch_credits(token))
+            raise AssertionError("missing Accounts structure must raise")
+        except RuntimeError as error:
+            assert "Accounts" in str(error)
+    print("✅ test_fetch_credits_distinguishes_empty_from_missing_structure")
+
+
 def test_fetch_request_usage_paging():
     """mock 分页明细：跨页聚合 credit，按 日期×模型 归并；请求天数夹到 30 天。"""
     pages = [
@@ -728,6 +791,8 @@ if __name__ == "__main__":
     test_current_models_merge()
     test_credits_to_usd()
     test_aggregate_credits()
+    test_fetch_request_usage_rejects_invalid_success_payloads()
+    test_fetch_credits_distinguishes_empty_from_missing_structure()
     test_fetch_request_usage_paging()
     test_billing_balance_identity()
     test_billing_intl_split()

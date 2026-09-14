@@ -312,7 +312,16 @@ def fetch_credits(access_token: str, uid: str = "", domain: str = "") -> dict:
                 raise RuntimeError(str(payload.get("msg") or f"积分接口 code={code}"))
             data = payload.get("data") or {}
             resp = (data.get("Response") or {}).get("Data") or (data.get("data") or {}).get("Response", {}).get("Data") or data
-            accounts = resp.get("Accounts") or payload.get("data", {}).get("accounts") or []
+            # 区分「合法的零余额」与「结构缺失的未知失败」：只有 Accounts/accounts 键存在才算有效响应
+            accounts = None
+            if isinstance(resp, dict) and isinstance(resp.get("Accounts"), list):
+                accounts = resp["Accounts"]
+            elif isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("accounts"), list):
+                accounts = payload["data"]["accounts"]
+            if accounts is None:
+                last_err = RuntimeError("积分接口返回缺少 Accounts 结构")
+                time.sleep(0.3 * (attempt + 1))
+                continue
             if not accounts and attempt < 2:  # 偶发空 Accounts，重试一次
                 time.sleep(0.3 * (attempt + 1))
                 continue
@@ -554,8 +563,15 @@ def fetch_request_usage(access_token: str, days: int = USAGE_MAX_DAYS,
                                          dict(body_base, pageNum=page, pageSize=USAGE_PAGE_SIZE))
             if status != 200:
                 raise RuntimeError(f"用量明细接口 HTTP {status}")
-            data = payload.get("data") or {}
-            rows = data.get("data") or []
+            code = payload.get("code")
+            if code not in (0, None):
+                raise RuntimeError(f"用量明细接口 code={code}: {str(payload.get('msg'))[:120]}")
+            data = payload.get("data")
+            # HTTP 200 但缺少业务结构不是「零用量」：total 缺失还会让分页提前中断
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list) \
+                    or not isinstance(data.get("total"), (int, float)):
+                raise RuntimeError("用量明细接口返回缺少 data.data/total 结构")
+            rows = data["data"]
             for row in rows:
                 date = str(row.get("requestTime") or "")[:10]
                 model = str(row.get("model") or "unknown")
@@ -566,7 +582,7 @@ def fetch_request_usage(access_token: str, days: int = USAGE_MAX_DAYS,
                 by_day[date][model] = round(by_day[date].get(model, 0.0) + credit, 6)
                 total_credits += credit
                 requests += 1
-            if requests >= int(data.get("total") or 0) or not rows:
+            if requests >= int(data["total"]) or not rows:
                 break
     return {"by_day": by_day, "total_credits": round(total_credits, 2), "requests": requests}
 
