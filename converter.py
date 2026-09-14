@@ -3060,12 +3060,6 @@ def main():
     if args.command == "login":
         return login(site=args.site, open_browser=not args.no_browser)
 
-    # 暴露到非回环地址且未设 API key = 匿名推理开放：默认拒启；Docker 由 compose 端口映射控制边界并显式放行
-    if (args.host not in ("127.0.0.1", "::1", "localhost") and not args.api_key
-            and os.environ.get("CODEBUDDY2API_ALLOW_OPEN_NOAUTH", "").lower() not in ("1", "true", "yes")):
-        ap.error("非回环绑定且未设置 API key 会匿名开放推理额度；"
-                 "请设置 CODEBUDDY2API_KEY，或确知风险后以 CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true 显式放行")
-
     for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit", "auto_trial",
                 "tool_call_max_retry", "max_inbound_bytes", "max_collect_bytes", "max_concurrent"):
         CONFIG[key] = getattr(args, key)
@@ -3080,6 +3074,12 @@ def main():
     CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2API_LOG")
     from app import runtime_management
     runtime_management.initialize(sys.modules[__name__], args)
+    # 持久化设置解析后再核对实际监听地址和生效 key，且必须早于凭据扫描、线程及监听。
+    if (args.host not in ("127.0.0.1", "::1", "localhost") and not CONFIG.get("api_key")
+            and os.environ.get("CODEBUDDY2API_ALLOW_OPEN_NOAUTH", "").lower() not in ("1", "true", "yes")):
+        runtime_management.close(CONFIG)
+        ap.error("非回环绑定且未设置 API key 会匿名开放推理额度；"
+                 "请设置 CODEBUDDY2API_KEY，或确知风险后以 CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true 显式放行")
     files = [Path(p) for p in args.auth_file]
     if not files:
         seed_credentials()  # 自管模式：启动时把桌面端缺失凭据复制进 auth/

@@ -778,9 +778,16 @@ class AuxiliaryCapacityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
-    def configure(self, env=None, flags=(), invalid=False):
+    def configure(self, env=None, flags=(), invalid=False, stored=None, expected_host=None):
         with contextlib.ExitStack() as stack:
             directory = stack.enter_context(tempfile.TemporaryDirectory())
+            if stored:
+                from app.control_store import ControlStore
+                store = ControlStore(Path(directory) / "control.sqlite3")
+                try:
+                    store.update_settings(stored, store.snapshot()["revision"])
+                finally:
+                    store.close()
             stack.enter_context(patch.object(converter, "managed_auth_dir", return_value=Path(directory)))
             stack.enter_context(patch.object(converter, "app", FastAPI()))
             stack.enter_context(patch.dict(os.environ, env or {}, clear=True))
@@ -792,15 +799,21 @@ class ConfigurationTests(unittest.TestCase):
             stack.enter_context(patch.object(converter, "credits_mod", None))
             stack.enter_context(patch.object(converter.threading, "Thread"))
             server = stack.enter_context(patch.object(converter.uvicorn, "run"))
+            from app import runtime_management
+            close = stack.enter_context(patch.object(runtime_management, "close", wraps=runtime_management.close))
             if invalid:
                 with self.assertRaises(SystemExit) as caught:
                     converter.main()
                 self.assertEqual(caught.exception.code, 2)
                 seed.assert_not_called()
                 server.assert_not_called()
+                if stored:
+                    close.assert_called_once_with(converter.CONFIG)
                 return
             converter.main()
             server.assert_called_once()
+            if expected_host is not None:
+                self.assertEqual(server.call_args.kwargs["host"], expected_host)
             return {key: converter.CONFIG[key] for key in (
                 "max_images", "image_policy", "max_request_bytes", "log_body_limit", "admin_csrf", "keep_tool_metadata")}
 
@@ -816,6 +829,19 @@ class ConfigurationTests(unittest.TestCase):
         self.configure(env={"CODEBUDDY2API_ALLOW_OPEN_NOAUTH": "true"}, flags=("--host", "0.0.0.0"))
         # 非回环但设了 key：正常
         self.configure(env={"CODEBUDDY2API_KEY": "k"}, flags=("--host", "0.0.0.0"))
+
+    def test_persisted_host_is_validated_after_configuration_resolution(self):
+        for host in ("0.0.0.0", "::"):
+            with self.subTest(host=host):
+                self.configure(stored={"host": host}, invalid=True)
+                self.configure(stored={"host": host}, env={"CODEBUDDY2API_KEY": "k"}, expected_host=host)
+                self.configure(stored={"host": host}, env={"CODEBUDDY2API_ALLOW_OPEN_NOAUTH": "true"},
+                               expected_host=host)
+        self.configure(stored={"host": "0.0.0.0"}, flags=("--host", "127.0.0.1"), expected_host="127.0.0.1")
+        self.configure(stored={"host": "127.0.0.1"}, flags=("--host", "0.0.0.0"), invalid=True)
+        self.configure(stored={"host": "0.0.0.0"}, env={"CODEBUDDY2API_KEY": ""},
+                       flags=("--api-key", "k"), expected_host="0.0.0.0")
+
 
     def test_environment_and_explicit_cli_precedence(self):
         env = {"CODEBUDDY2API_MAX_IMAGES": "8", "CODEBUDDY2API_IMAGE_POLICY": "error",
