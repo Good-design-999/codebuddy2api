@@ -13,7 +13,7 @@ Management is locked without a key. After changing it, sign in again and restart
 - **Overview:** view requests, usage and credential health. Official account balances may include usage from other clients.
 - **Credentials:** select Mainland China (CN), International WorkBuddy or International CodeBuddy for browser login, or import `.info`/ZIP files. Distinguish manual disabling, credential-level authentication circuits and model-level 429 cooldowns. Disabling keeps files; deletion removes them and requires removing model bindings first. Exports contain plaintext credentials; do not share them.
 - **Models:** enable models, set public IDs, regions/products and specific accounts. Unavailable bindings never fall back to unselected accounts. Clients use the IDs published here.
-- **Logs:** filter requests and inspect failed attempts. Clearing details keeps historical statistics.
+- **Logs:** filter requests and inspect failed attempts. Closing details or switching log type cancels pending detail loads. Clearing details keeps historical statistics.
 - **Settings:** edit unlocked options; hot changes apply immediately, while restart-marked settings require a manual restart. Change locked options in the startup configuration; see [configuration precedence](advanced.md).
   - “Keep tool descriptions” is off by default and works across all three protocols, independently of prompt compaction; see [tool metadata retention](advanced.md#tool-metadata-retention) for configuration and limits.
 
