@@ -47,6 +47,7 @@ def _public_credential(item):
               "credits_by_profile", "catalog", "catalog_sync", "sync", "generation", "auth_broken",
               "models", "remaining", "enterprise_id", "product", "status", "sync_pending", "sync_error",
               "fail_until", "cooldown_until", "cooldown_remaining", "last_failure_at", "catalog_ready", "bindings",
+              "auto_checkin", "auto_travel", "travel_supported", "checkin", "travel",
               "token_expired", "token_expires_at", "last_refresh_time", "sessions", "sticky_sessions", "last_error_code"}
     result = {key: value for key, value in item.items() if key in fields}
     identity = item.get("account_key") or item.get("id")
@@ -345,17 +346,23 @@ def install_admin(app, config, gateway):
     @route("PATCH", "/admin/credentials/{id}")
     async def credentials_patch(request):
         data = await _body(request)
-        if set(data) != {"enabled"} or type(data["enabled"]) is not bool:
-            raise ValueError("enabled 必须为布尔值")
+        if set(data) not in ({"enabled"}, {"auto_checkin"}, {"auto_travel"}) or any(type(value) is not bool for value in data.values()):
+            raise ValueError("仅接受一个布尔字段：enabled、auto_checkin 或 auto_travel")
+        field, value = next(iter(data.items()))
         identity = request.path_params["id"]
         def apply():
             if selected(identity) is None:
                 return error_response(404, "凭证不存在")
             with mutation_lock:
                 # The gateway persists under the pool lock before publishing routing state.
-                gateway.admin_set_credential_enabled(identity, data["enabled"])
-            event("credential.enabled", {"credential": identity, "enabled": data["enabled"]})
-            return JSONResponse({"id": identity, "enabled": data["enabled"], "revision": control.snapshot()["revision"]})
+                if field == "enabled":
+                    gateway.admin_set_credential_enabled(identity, value)
+                elif field == "auto_checkin":
+                    gateway.admin_set_auto_checkin(identity, value)
+                else:
+                    gateway.admin_set_auto_travel(identity, value)
+            event("credential." + field, {"credential": identity, field: value})
+            return JSONResponse({"id": identity, field: value, "revision": control.snapshot()["revision"]})
         return await run_in_threadpool(apply)
 
     def upload(body):

@@ -29,6 +29,17 @@ def credential_enabled(config, entry):
     return snapshot(config)["credentials"].get(entry.get("account_key"), {}).get("enabled", True)
 
 
+def credential_auto_checkin(config, entry):
+    """International accounts opt in explicitly; the preference is independent of routing."""
+    default = entry.get("profile") in {"cn-cli", "cn-work"}
+    return snapshot(config)["credentials"].get(entry.get("account_key"), {}).get("auto_checkin", default)
+
+
+def credential_auto_travel(config, entry):
+    supported = entry.get("profile") in {"cn-cli", "cn-work"}
+    return supported and snapshot(config)["credentials"].get(entry.get("account_key"), {}).get("auto_travel", True)
+
+
 def default_rule(source):
     return {"public_id": source, "upstream_id": source, "custom": False,
             "enabled": True, "keep_original": False,

@@ -105,7 +105,9 @@ class ControlStore:
             validate_model(source, rule, data["models"], legacy_scopes=True)  # 旧联合范围保持原有交集，编辑时再显式转换。
         for identity, metadata in data["credentials"].items():
             _identifier(identity, "账号指纹")
-            if not isinstance(metadata, dict) or set(metadata) - {"enabled", "label"} or type(metadata.get("enabled")) is not bool:
+            if (not isinstance(metadata, dict) or set(metadata) - {"enabled", "label", "auto_checkin", "auto_travel"}
+                    or type(metadata.get("enabled")) is not bool
+                    or any(key in metadata and type(metadata[key]) is not bool for key in ("auto_checkin", "auto_travel"))):
                 raise ValueError("管理数据库凭证元数据无效")
         return {"revision": row[0], **data}
 
@@ -161,6 +163,20 @@ class ControlStore:
         if type(enabled) is not bool:
             raise ValueError("enabled 必须为布尔值")
         return self._update(None, lambda state: state["credentials"].setdefault(account_key, {}).update(enabled=enabled))
+
+    def set_auto_checkin(self, account_key, enabled):
+        _identifier(account_key, "账号指纹")
+        if type(enabled) is not bool:
+            raise ValueError("auto_checkin 必须为布尔值")
+        return self._update(None, lambda state: state["credentials"].setdefault(
+            account_key, {"enabled": True}).update(auto_checkin=enabled))
+
+    def set_auto_travel(self, account_key, enabled):
+        _identifier(account_key, "账号指纹")
+        if type(enabled) is not bool:
+            raise ValueError("auto_travel 必须为布尔值")
+        return self._update(None, lambda state: state["credentials"].setdefault(
+            account_key, {"enabled": True}).update(auto_travel=enabled))
 
     def close(self):
         with self._lock:

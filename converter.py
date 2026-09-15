@@ -66,7 +66,7 @@ from app.adapters.anthropic_adapter import (
 
 from app import auth_oauth
 from app import trial_rewards
-from app import model_policy
+from app import checkin as checkin_service, model_policy, travel
 from app.model_blocks import ModelBlocks
 from app.observability import (AuditMiddleware, observe_route, observe_usage,
                                observe_attempt, observe_failure)
@@ -1127,14 +1127,27 @@ def _sync_credits(pool, ledger, entry, *, checkin, failed, claim_trial=True, exp
                 headers = cm.get_headers()
             finally:
                 generation = cm._generation
+        profile = profile_for_headers(headers)
+        identity = account_key(profile, headers.get("X-User-Id"), headers.get("X-Enterprise-Id"))
+        if entry.get("account_key") and entry["account_key"] != identity:
+            failed.add(cid)
+            return None  # A path now owned by another account must be rescheduled with its own preferences.
         site = site_for_headers(headers)
         token, uid, domain = _bearer_token(headers), headers.get("X-User-Id", ""), headers.get("X-Domain", "")
         day = time.strftime("%Y-%m-%d")
-        if checkin and not ledger.checkin_done(cid, day):
+        if checkin and model_policy.credential_auto_checkin(CONFIG, entry) and not ledger.checkin_done(cid, day):
             try:
-                result = credits_mod.daily_checkin(token, uid=uid, domain=domain)
-                if not pool.apply_if_current(cm, generation, lambda: ledger.mark_checkin(
-                        cid, day, result["ok"], result.get("code"), result.get("message", ""))):
+                def can_claim():
+                    return (model_policy.credential_auto_checkin(CONFIG, entry)
+                            and pool.apply_if_current(cm, generation, lambda: None))
+                result = checkin_service.perform(token, uid=uid, domain=domain, can_claim=can_claim)
+                if result["state"] == "cancelled":
+                    if not pool.apply_if_current(cm, generation, lambda: None):
+                        failed.add(cid)
+                        return None
+                    # A preference-only cancellation must not interrupt balance refresh.
+                elif not pool.apply_if_current(cm, generation, lambda: ledger.mark_checkin(
+                        cid, day, result["ok"], result.get("code"), result["message"], state=result["state"])):
                     failed.add(cid)
                     return None
                 _log(f"[checkin] {Path(cid).name}: ok={result['ok']} already={result.get('already')} code={result.get('code')}")
@@ -1142,6 +1155,17 @@ def _sync_credits(pool, ledger, entry, *, checkin, failed, claim_trial=True, exp
                 _sync_error(pool, ledger, entry, generation, "checkin", error)
         if not model_policy.credential_enabled(CONFIG, entry):
             return None
+        if checkin and model_policy.credential_auto_travel(CONFIG, entry):
+            try:
+                def can_travel():
+                    return (model_policy.credential_auto_travel(CONFIG, entry)
+                            and pool.apply_if_current(cm, generation, lambda: None))
+                trip = travel.perform(token, profile_for_headers(headers), can_write=can_travel)
+                if not pool.apply_if_current(cm, generation, lambda: travel.remember(ledger, cid, trip)):
+                    failed.add(cid)
+                    return None
+            except Exception as error:
+                _sync_error(pool, ledger, entry, generation, "travel", error)
         if claim_trial:
             _sync_trial(headers)
         if not model_policy.credential_enabled(CONFIG, entry):

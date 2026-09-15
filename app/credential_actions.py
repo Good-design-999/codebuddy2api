@@ -4,12 +4,12 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from . import model_policy
+from . import checkin, model_policy, travel
 from .credential_io import credential_file_lock
 
 
 def run(gateway, action, identity=None):
-    if action not in {"refresh", "checkin", "sync"} or (action == "refresh" and identity is None):
+    if action not in {"refresh", "checkin", "sync", "travel", "travel-status"} or (action in {"refresh", "travel", "travel-status"} and identity is None):
         raise HTTPException(404, "凭证操作不存在")
     config = gateway.CONFIG
     pool, ledger = config.get("cred_pool"), config.get("ledger")
@@ -31,9 +31,16 @@ def run(gateway, action, identity=None):
             else:
                 try:
                     result.update(_one(gateway, pool, ledger, entry, action))
+                    if (action == "checkin" and result.get("state") not in {"changed", "cancelled"}
+                            and model_policy.credential_auto_travel(config, entry)):
+                        followup = _one(gateway, pool, ledger, entry, "travel", automatic=True)
+                        result.update(travel=followup, checkin_ok=result["ok"], ok=result["ok"] and followup["ok"],
+                                      message=result["message"] + "；" + followup["message"])
                 except Exception:
                     # Upstream exception text may contain headers or credential file paths.
-                    result.update(message="操作失败，保留已有数据；请检查账号状态后重试")
+                    if action == "checkin" and result["ok"]:
+                        result["checkin_ok"] = True
+                    result.update(ok=False, message="操作失败，保留已有数据；请检查账号状态后重试")
             results.append(result)
             audit = config.get("audit_store")
             if audit:
@@ -49,11 +56,15 @@ def run(gateway, action, identity=None):
         gateway._HOUSEKEEP_LOCK.release()
 
 
-def _one(gateway, pool, ledger, entry, action):
+def _one(gateway, pool, ledger, entry, action, *, automatic=False):
     cm, cid = entry["cm"], entry["id"]
+    if not model_policy.credential_enabled(gateway.CONFIG, entry):
+        return {"ok": False, "skipped": True, "message": "账号已人工停用"}
+    if action in {"travel", "travel-status"} and not travel.supported(entry.get("profile")):
+        return travel.unavailable()
     with cm._lock:
         if cm.summary().get("account_key") != entry.get("account_key"):
-            return {"ok": False, "message": "凭证身份已变化，请刷新列表"}
+            return {"ok": False, "state": "changed", "message": "凭证身份已变化，请刷新列表"}
         if action == "refresh":
             with credential_file_lock(cm.path.parent, cm.path.name):
                 if cm.summary().get("account_key") != entry.get("account_key"):
@@ -67,20 +78,29 @@ def _one(gateway, pool, ledger, entry, action):
         pool.reload([cm.path], reset=False)
         current = pool.apply_if_current(cm, generation, lambda: None)
         return {"ok": current, "message": "凭证已刷新" if current else "凭证已变化，请刷新列表核验"}
+    if action in {"travel", "travel-status"}:
+        def can_write():
+            return ((not automatic or model_policy.credential_auto_travel(gateway.CONFIG, entry))
+                    and pool.apply_if_current(cm, generation, lambda: None))
+        result = travel.perform(gateway._bearer_token(headers), gateway.profile_for_headers(headers),
+                                read_only=action == "travel-status", can_write=can_write)
+        if not pool.apply_if_current(cm, generation, lambda: travel.remember(ledger, cid, result)):
+            return {"ok": False, "message": "凭证已变化，旅行结果未写入，请刷新核验"}
+        return result
     if action == "checkin":
         day = time.strftime("%Y-%m-%d")
         if ledger.checkin_done(cid, day):
             current = pool.apply_if_current(cm, generation, lambda: None)
-            return {"ok": current, "already": current,
+            return {"ok": current, "already": current, "state": "already" if current else "changed",
                     "message": "今日已签到" if current else "凭证已变化，请刷新列表核验"}
-        result = gateway.credits_mod.daily_checkin(gateway._bearer_token(headers),
-            uid=headers.get("X-User-Id", ""), domain=headers.get("X-Domain", ""))
-        ok = result.get("ok") is True
+        result = checkin.perform(gateway._bearer_token(headers),
+            uid=headers.get("X-User-Id", ""), domain=headers.get("X-Domain", ""),
+            can_claim=lambda: pool.apply_if_current(cm, generation, lambda: None))
         current = pool.apply_if_current(cm, generation, lambda: ledger.mark_checkin(
-            cid, day, ok, result.get("code"), "成功" if ok else "上游未确认签到成功"))
-        return {"ok": ok and current, "already": bool(result.get("already")),
-                "message": ("今日已签到" if result.get("already") else "签到成功，余额可另行同步")
-                if ok and current else "签到未确认成功，请核验账号状态"}
+            cid, day, result["ok"], result.get("code"), result["message"], state=result["state"]))
+        if not current:
+            return checkin.normalize({"state": "changed"})
+        return result
     failed = set()
     ref = gateway._sync_credits(pool, ledger, entry, checkin=False, claim_trial=False, failed=failed,
                                 expected_identity=entry.get("account_key"))

@@ -34,6 +34,10 @@ class CredentialActionTests(unittest.TestCase):
         install_admin(app, converter.CONFIG, Management(converter))
         self.client = self.enterContext(TestClient(app, base_url="https://testserver",
             headers={"Authorization": "Bearer synthetic-management-key"}))
+        self.status_query = self.enterContext(patch.object(converter.credits_mod, "fetch_checkin_status",
+            return_value={"ok": False, "state": "available", "code": 0}))
+        self.travel_mock = self.enterContext(patch("app.travel.perform",
+            return_value={"ok": True, "skipped": True, "state": "traveling", "message": "Buddy 旅行中"}))
         self.entry = self.entries["cn-cli"]
         self.url = "/admin/credentials/" + self.entry["account_key"]
 

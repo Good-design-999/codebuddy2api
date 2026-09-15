@@ -8,7 +8,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.staticfiles import StaticFiles
 
-from . import model_policy
+from . import checkin, model_policy, travel
 
 
 class Management:
@@ -43,6 +43,11 @@ class Management:
                 state = ("disabled" if not enabled else "error" if row.get("error") else
                          "circuit_open" if until > now else "expired" if row.get("token_expired") else "ready")
                 row.update(id=identity, name=Path(path).name, enabled=enabled, health=state,
+                           auto_checkin=model_policy.credential_auto_checkin(self.CONFIG, entry),
+                           checkin=checkin.view(balance.get("checkin") or {}),
+                           auto_travel=model_policy.credential_auto_travel(self.CONFIG, entry),
+                           travel_supported=travel.supported(entry.get("profile")),
+                           travel=balance.get("travel") or {"state": "unknown", "message": "尚未查询旅行状态"},
                            fail_until=until, cooldown_until=until,
                            cooldown_remaining=max(0, round(until - now)),
                            last_error_code=("http_401" if entry.get("last_error") == "backend HTTP 401" else
@@ -76,6 +81,28 @@ class Management:
                     pool._sync_event.clear()
             self.gateway.invalidate_model_table()
         return next(row for row in self.admin_credential_inventory() if row["id"] == identity)
+
+    def admin_set_auto_checkin(self, identity, enabled):
+        pool = self.CONFIG.get("cred_pool")
+        if pool is None:
+            raise HTTPException(404, "凭证不存在")
+        with pool._lock:
+            if not any(entry.get("account_key") == identity for entry in pool.entries()):
+                raise HTTPException(404, "凭证不存在")
+            self.CONFIG["control_store"].set_auto_checkin(identity, enabled)
+        # Persist only: enabling does not launch a claim or enqueue unrelated synchronization.
+
+    def admin_set_auto_travel(self, identity, enabled):
+        pool = self.CONFIG.get("cred_pool")
+        if pool is None:
+            raise HTTPException(404, "凭证不存在")
+        with pool._lock:
+            entry = next((entry for entry in pool.entries() if entry.get("account_key") == identity), None)
+            if entry is None:
+                raise HTTPException(404, "凭证不存在")
+            if enabled and not travel.supported(entry.get("profile")):
+                raise HTTPException(400, "旅行仅适用于国内账号")
+            self.CONFIG["control_store"].set_auto_travel(identity, enabled)
 
     def admin_delete_guard(self, name):
         rows = self.admin_credential_inventory()
