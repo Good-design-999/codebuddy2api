@@ -8,7 +8,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.staticfiles import StaticFiles
 
-from . import checkin, model_policy, travel
+from . import checkin, model_policy, travel, trial_management
 
 
 class Management:
@@ -25,6 +25,7 @@ class Management:
             return []
         pool._rescan()
         now = time.time()
+        trials = trial_management.inventory(self.CONFIG.get("trial_ledger"))
         with pool._lock:
             entries = {entry["id"]: entry for entry in pool.entries()}
             result = []
@@ -48,6 +49,10 @@ class Management:
                            auto_travel=model_policy.credential_auto_travel(self.CONFIG, entry),
                            travel_supported=travel.supported(entry.get("profile")),
                            travel=balance.get("travel") or {"state": "unknown", "message": "尚未查询旅行状态"},
+                           trial_supported=entry.get("profile") == "intl-work",
+                           trial=(trial_management.view(trials.get(identity), now=now) if trials is not None
+                                  else trial_management.failure("storage_error"))
+                                 if entry.get("profile") == "intl-work" else trial_management.failure("not_applicable"),
                            fail_until=until, cooldown_until=until,
                            cooldown_remaining=max(0, round(until - now)),
                            last_error_code=("http_401" if entry.get("last_error") == "backend HTTP 401" else
@@ -185,8 +190,6 @@ class Management:
                 self.CONFIG[key] = value
         if "model_catalog_ttl" in values and self.CONFIG.get("model_cache") is not None:
             self.CONFIG["model_cache"].ttl = values["model_catalog_ttl"]
-        if "auto_trial" in values and values["auto_trial"] and self.CONFIG.get("trial_ledger") is None:
-            self.CONFIG["trial_ledger"] = self.gateway.trial_rewards.TrialLedger(self.gateway.managed_auth_dir() / "trial-ledger.json")
         self.gateway.invalidate_model_table()
 
 

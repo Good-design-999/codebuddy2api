@@ -4,16 +4,16 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from . import checkin, model_policy, travel
+from . import checkin, model_policy, travel, trial_management
 from .credential_io import credential_file_lock
 
 
 def run(gateway, action, identity=None):
-    if action not in {"refresh", "checkin", "sync", "travel", "travel-status"} or (action in {"refresh", "travel", "travel-status"} and identity is None):
+    if action not in {"refresh", "checkin", "sync", "travel", "travel-status", "trial"} or (action in {"refresh", "travel", "travel-status", "trial"} and identity is None):
         raise HTTPException(404, "凭证操作不存在")
     config = gateway.CONFIG
     pool, ledger = config.get("cred_pool"), config.get("ledger")
-    if pool is None or (action != "refresh" and (ledger is None or gateway.credits_mod is None)):
+    if pool is None or (action not in {"refresh", "trial"} and (ledger is None or gateway.credits_mod is None)):
         raise HTTPException(503, "凭证维护尚未就绪")
     # Do not queue duplicate manual work behind the periodic maintenance sweep.
     if not gateway._HOUSEKEEP_LOCK.acquire(blocking=False):
@@ -23,11 +23,15 @@ def run(gateway, action, identity=None):
         entries = [dict(e) for e in pool.entries() if identity is None or e.get("account_key") == identity]
         if identity is not None and not entries:
             raise HTTPException(404, "凭证不存在或身份已变化")
+        if action == "trial":
+            entries = entries[:1]  # Duplicate files for one identity still represent one manual action.
         results = []
         for entry in entries:
+            started = time.monotonic()
             result = {"id": entry.get("account_key"), "name": Path(entry["id"]).name, "action": action, "ok": False}
             if not model_policy.credential_enabled(config, entry):
-                result.update(skipped=True, message="账号已人工停用")
+                result.update(trial_management.failure("changed", skipped=True) if action == "trial"
+                              else {"skipped": True, "message": "账号已人工停用"})
             else:
                 try:
                     result.update(_one(gateway, pool, ledger, entry, action))
@@ -45,7 +49,13 @@ def run(gateway, action, identity=None):
             audit = config.get("audit_store")
             if audit:
                 try:
-                    audit.event("admin", "credential." + action, {"credential": result["id"], "ok": result["ok"]})
+                    details = {"credential": result["id"], "ok": result["ok"]}
+                    if action == "trial":
+                        details.update(outcome="success" if result["ok"] else "error", stage=result.get("state"),
+                                       status_code=result.get("status"),
+                                       code=str(result["code"]) if result.get("code") is not None else None,
+                                       duration_ms=(time.monotonic() - started) * 1000)
+                    audit.event("admin", "credential." + action, details)
                 except Exception:
                     pass
         response = {"ok": bool(results) and all(r["ok"] for r in results), "results": results}
@@ -57,6 +67,8 @@ def run(gateway, action, identity=None):
 
 
 def _one(gateway, pool, ledger, entry, action, *, automatic=False):
+    if action == "trial":
+        return trial_management.perform(gateway, pool, entry)
     cm, cid = entry["cm"], entry["id"]
     if not model_policy.credential_enabled(gateway.CONFIG, entry):
         return {"ok": False, "skipped": True, "message": "账号已人工停用"}
@@ -102,7 +114,7 @@ def _one(gateway, pool, ledger, entry, action, *, automatic=False):
             return checkin.normalize({"state": "changed"})
         return result
     failed = set()
-    ref = gateway._sync_credits(pool, ledger, entry, checkin=False, claim_trial=False, failed=failed,
+    ref = gateway._sync_credits(pool, ledger, entry, checkin=False, failed=failed,
                                 expected_identity=entry.get("account_key"))
     if ref is not None:
         if not pool.apply_if_current(cm, ref[1], lambda: entry.update(catalog_dirty=True)):

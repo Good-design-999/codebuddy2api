@@ -26,7 +26,6 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 | `--usd-rate` | `7.15` | 每美元对应人民币金额，用于 billing 折算 |
 | `--model-catalog-ttl` | `21600` | 模型目录缓存有效期，秒 |
 | `--no-model-guard` | 关 | 关闭目录外模型的本地拦截；表外透传仅限单产品，不绕过禁用、绑定或目录就绪检查 |
-| `--auto-trial [true/false]` | `false` | 尝试领取国际 WorkBuddy 一次性体验积分 |
 | `--max-images` | `16` | 单请求图片总数；`0` 不允许图片 |
 | `--image-policy` | `truncate` | 保留最新图片；设为 `error` 时超限返回 413 |
 | `--tool-call-max-retry` | `3` | 工具参数损坏时的额外生成上限（每次都消耗额度）；`0` 不重试 |
@@ -38,9 +37,11 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 | `--max-request-bytes` | `33554432` | 处理后的上游 JSON 字节上限，须为正整数 |
 | `--log-body-limit` | `65536` | 兼容文本日志正文预览字节；`0` 只记摘要，不控制 SQLite 诊断预算 |
 
-环境变量包括 `CODEBUDDY_AUTH_DIR`、`CODEBUDDY_IMPORT_DIR`、`CODEBUDDY2API_KEY`、`CODEBUDDY2API_ADMIN_CSRF`、`CODEBUDDY2API_KEEP_TOOL_METADATA`、`CODEBUDDY2API_LOG`，以及 `CODEBUDDY2API_MAX_IMAGES`、`CODEBUDDY2API_IMAGE_POLICY`、`CODEBUDDY2API_MAX_REQUEST_BYTES`、`CODEBUDDY2API_LOG_BODY_LIMIT`、`CODEBUDDY2API_AUTO_TRIAL`、`CODEBUDDY2API_FAILOVER_MAX`、`CODEBUDDY2API_RETRY_WRITE_TIMEOUT`。启动示例见 [部署指南](deployment.zh-CN.md)。
+环境变量包括 `CODEBUDDY_AUTH_DIR`、`CODEBUDDY_IMPORT_DIR`、`CODEBUDDY2API_KEY`、`CODEBUDDY2API_ADMIN_CSRF`、`CODEBUDDY2API_KEEP_TOOL_METADATA`、`CODEBUDDY2API_LOG`，以及 `CODEBUDDY2API_MAX_IMAGES`、`CODEBUDDY2API_IMAGE_POLICY`、`CODEBUDDY2API_MAX_REQUEST_BYTES`、`CODEBUDDY2API_LOG_BODY_LIMIT`、`CODEBUDDY2API_FAILOVER_MAX`、`CODEBUDDY2API_RETRY_WRITE_TIMEOUT`。启动示例见 [部署指南](deployment.zh-CN.md)。
 
-体验积分领取默认关闭，仅适用于符合上游资格的 `intl-work` 账号。成功或已领取的结果按账号保存到 `auth/trial-ledger.json`，失败至少退避 24 小时，不立即重放 POST；资格与额度以上游为准，升级时保留该文件。
+体验积分仅供符合官方资格的 `intl-work` 账号手动领取：使用凭证行的领取抽屉或 `POST /admin/credentials/{id}/trial`。启动、定时维护、余额同步均不领取。结果显示安全错误类别、HTTP 状态／业务码及重试时间，响应正文限制为 64 KiB 且不返回浏览器。成功或已领取记录保存在 `auth/trial-ledger.json`，失败至少等待 24 小时才能再次手动申请；升级时保留该文件。
+
+`CODEBUDDY2API_AUTO_TRIAL` 和 `--auto-trial` 已停用：旧启动选项仅提示、不触发任务；控制库中的旧布尔 `auto_trial` 设置在加载时忽略。请从部署配置中移除；回滚旧代码前也须核对这些旧设置，避免重新启用自动领取。
 
 ### 工具描述保留
 
@@ -76,7 +77,7 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 | `POST /admin/oauth/start` · `GET /admin/oauth/poll` | 发起与轮询登录；`site=cn`（默认）、`intl`（国际 WorkBuddy）或 `intl-codebuddy`（国际 CodeBuddy） |
 | `GET /admin/credits` · `POST /admin/checkin` | 查询额度；按日幂等签到，国内按开关继续旅行 |
 | `POST /admin/sync` | 同步全部启用账号的余额、目录和用量，不签到、不领取试用 |
-| `POST /admin/credentials/{id}/{action}` | 单账号 `refresh`、`checkin`、`sync`、`travel-status`（仅查询）或 `travel`（领取后派出） |
+| `POST /admin/credentials/{id}/{action}` | 单账号 `refresh`、`checkin`、`sync`、`travel-status`（仅查询）、`travel`（领取后派出）或 `trial`（一次性体验积分） |
 
 页面使用 `/dashboard/*`，管理 API 使用 `/admin/*`，客户端保留原 `/v1/*`；不注册 `/cn`、`/intl` API 前缀。模型自动选路不要求客户端改变地址。
 

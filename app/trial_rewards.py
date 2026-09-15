@@ -20,14 +20,19 @@ from .site_routing import PROFILE_ENDPOINTS, profile_for_headers
 
 RETRY_INTERVAL = 24 * 60 * 60
 REQUEST_TIMEOUT = 12.0
+MAX_RESPONSE_BYTES = 64 * 1024
+RESPONSE_DEADLINE = 30.0
 _MAX_BYTES = 1024 * 1024
 _MAX_ACCOUNTS = 2048  # 满时拒绝新增，不能逐出已经领取的永久记录。
 _RESULT_FIELDS = {"ok", "already", "code", "status"}
 _RECORD_FIELDS = _RESULT_FIELDS | {"attempted_at", "finished_at"}
 
 
-def _result(code=None, status=None, *, ok=False, already=False):
-    return {"ok": ok, "already": already, "code": code, "status": status}
+def _result(code=None, status=None, *, ok=False, already=False, error=None):
+    result = {"ok": ok, "already": already, "code": code, "status": status}
+    if error:
+        result["error"] = error
+    return result
 
 
 def _integer(value, lower, upper):
@@ -64,19 +69,34 @@ def _trial_headers(headers):
 def claim_trial(headers: dict) -> dict:
     """仅一次同域 POST；保留传入身份头，不跟随重定向、不重试、不输出响应原文。"""
     headers = _trial_headers(headers)
+    status = None
+    started = time.monotonic()
+    request_headers = httpx.Headers(headers)
+    request_headers["Accept-Encoding"] = "identity"
     try:
         with httpx.Client(timeout=REQUEST_TIMEOUT, follow_redirects=False) as client:
-            response = client.post(PROFILE_ENDPOINTS["intl-work"] + "/billing/ide/trial",
-                                   headers=headers, json={})
+            with client.stream("POST", PROFILE_ENDPOINTS["intl-work"] + "/billing/ide/trial",
+                               headers=request_headers, json={}) as response:
+                status = response.status_code
+                if response.headers.get("content-encoding", "identity").lower() != "identity":
+                    return _result(status=status, error="invalid_response")
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    if time.monotonic() - started > RESPONSE_DEADLINE:
+                        return _result(status=status, error="timeout")
+                    if len(content) + len(chunk) > MAX_RESPONSE_BYTES:
+                        return _result(status=status, error="response_too_large")
+                    content.extend(chunk)
+    except httpx.TimeoutException:
+        return _result(status=status, error="timeout")
     except httpx.HTTPError:
-        return _result()
-    status = response.status_code
+        return _result(status=status, error="network_error")
     try:
-        envelope = _strict_json(response.content)
+        envelope = _strict_json(content)
     except (ValueError, UnicodeError, RecursionError):
-        return _result(status=status)
+        return _result(status=status, error="invalid_response")
     if not isinstance(envelope, dict):
-        return _result(status=status)
+        return _result(status=status, error="invalid_response")
     code = _integer(envelope.get("code"), -(2**31), 2**31 - 1)
     result = _result(code, status)
     accepted = 200 <= status < 300 or (status in (400, 409) and code == 14051)
@@ -100,7 +120,7 @@ def _key(key):
 
 
 def _timestamp(value):
-    if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1e12:
+    if type(value) not in (int, float) or not 0 <= value <= 1e12 or not math.isfinite(value):
         raise ValueError("Invalid trial timestamp")
     return value
 
@@ -118,6 +138,13 @@ def _safe_result(result):
 
 def _empty_record():
     return {**_result(), "attempted_at": None, "finished_at": None}
+
+
+class TrialSaveError(OSError):
+    """The upstream completed but its safe result could not be persisted."""
+    def __init__(self, result):
+        super().__init__("Trial result persistence failed")
+        self.result = _safe_result(result)
 
 
 class TrialLedger:
@@ -237,6 +264,11 @@ class TrialLedger:
                              "finished_at": max(current, previous["attempted_at"])}
             self._save(accounts)
 
+    def snapshot(self) -> dict:
+        """Read one atomically published snapshot without creating or waiting on lock files."""
+        return self._load()
+
+
     def summary(self, key) -> dict:
         """返回独立的安全快照，不包含指纹、路径、headers 或原始响应。"""
         key = _key(key)
@@ -244,11 +276,16 @@ class TrialLedger:
             return dict(self._load().get(key, _empty_record()))
 
 
-def attempt_trial(ledger: TrialLedger, key: str, headers: dict) -> dict:
-    """推荐集成入口；先检查 profile，再落盘 attempt，最后一次 POST 和 finish。"""
+def attempt_trial(ledger: TrialLedger, key: str, headers: dict, *, can_claim=lambda: True) -> dict:
+    """Reserve before the one manual POST; never replay an unconfirmed claim."""
     headers = _trial_headers(headers)
+    if not can_claim():
+        return _result(error="changed")
     if not ledger.begin(key):
         return _result()
-    result = claim_trial(headers)
-    ledger.finish(key, result)
+    result = claim_trial(headers) if can_claim() else _result(error="changed")
+    try:
+        ledger.finish(key, result)
+    except Exception:
+        raise TrialSaveError(result) from None
     return result

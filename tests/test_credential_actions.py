@@ -60,7 +60,7 @@ class CredentialActionTests(unittest.TestCase):
         other = self.entries["intl-work"]["id"]
         converter.CONFIG["usage_daily"] = {"stale_accounts": [Path(other).name]}
         with patch.object(converter.credits_mod, "daily_checkin") as checkin, \
-             patch.object(converter, "_sync_trial") as trial, \
+             patch.object(converter.trial_rewards, "claim_trial") as trial, \
              patch.object(converter.credits_mod, "fetch_credits", return_value={"credits": 80, "intl": False}) as balance, \
              patch.object(converter.credits_mod, "fetch_request_usage", return_value={"by_day": {}, "total_credits": 0, "requests": 0}) as usage:
             self.assertTrue(self.post("sync")["ok"])
@@ -135,7 +135,7 @@ class CredentialActionTests(unittest.TestCase):
         with patch.object(converter.credits_mod, "fetch_credits", side_effect=balance), \
              patch.object(converter.credits_mod, "fetch_request_usage", return_value={"by_day": {}, "total_credits": 0, "requests": 0}), \
              patch.object(converter.credits_mod, "daily_checkin") as checkin, \
-             patch.object(converter, "_sync_trial") as trial:
+             patch.object(converter.trial_rewards, "claim_trial") as trial:
             response = self.client.post("/admin/sync")
             self.assertEqual(response.status_code, 200)
             self.assertTrue(response.json()["ok"], response.text)

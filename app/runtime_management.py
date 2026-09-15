@@ -74,8 +74,7 @@ def initialize(gateway, args, argv=None):
     for key in SCHEMA:
         if hasattr(args, key) and key != "api_key":
             setattr(args, key, config[key])
-    config["trial_ledger"] = (gateway.trial_rewards.TrialLedger(root / "trial-ledger.json")
-                              if config["auto_trial"] else None)
+    config["trial_ledger"] = gateway.trial_rewards.TrialLedger(root / "trial-ledger.json")
     try:
         config["audit_store"] = AuditStore(root / "logs.sqlite3", max_bytes=config["audit_max_bytes"],
                                             retention_days=config["audit_retention_days"],

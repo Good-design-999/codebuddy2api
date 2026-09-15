@@ -98,7 +98,7 @@ class ControlStore:
         data = json.loads(row[1])
         if not isinstance(data, dict) or set(data) != {"settings", "models", "credentials"}:
             raise ValueError("管理数据库状态无效")
-        validate_settings(data["settings"])
+        data["settings"] = validate_settings(data["settings"], legacy=True)
         if not isinstance(data["models"], dict) or not isinstance(data["credentials"], dict):
             raise ValueError("管理数据库策略无效")
         for source, rule in data["models"].items():
