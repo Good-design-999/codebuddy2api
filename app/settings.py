@@ -39,7 +39,6 @@ SCHEMA = {
     "image_policy": _item("truncate", "string", "超额图片策略", env="CODEBUDDY2API_IMAGE_POLICY", choices=["truncate", "error"]),
     "max_request_bytes": _item(32 * 1024 * 1024, "integer", "请求字节上限", env="CODEBUDDY2API_MAX_REQUEST_BYTES", minimum=1, maximum=1024**3),
     "log_body_limit": _item(65536, "integer", "文本正文预览字节", env="CODEBUDDY2API_LOG_BODY_LIMIT", minimum=0, maximum=1024**2),
-    "auto_trial": _item(False, "boolean", "自动领取体验积分", env="CODEBUDDY2API_AUTO_TRIAL"),
     "failover_max": _item(0, "integer", "换凭证重放次数", env="CODEBUDDY2API_FAILOVER_MAX",
                           minimum=0, maximum=10),
     "retry_write_timeout": _item(False, "boolean", "写超时参与重放",
@@ -50,11 +49,13 @@ SCHEMA = {
 }
 
 
-def validate_settings(values):
+def validate_settings(values, *, legacy=False):
     if not isinstance(values, dict):
         raise ValueError("values 必须是对象")
     clean = {}
     for key, value in values.items():
+        if legacy and key == "auto_trial" and type(value) is bool:
+            continue  # Retired persisted switch: accept old databases without enabling claims.
         spec = SCHEMA.get(key)
         if spec is None or spec["sensitive"]:
             raise ValueError("未知或启动来源锁定的配置项")

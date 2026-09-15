@@ -37,11 +37,18 @@ def forbid_connect(*args, **kwargs):
     raise AssertionError("Fixture must never open an upstream connection")
 
 
+def fake_trial(headers):
+    if headers.get("X-User-Id") == "trial-timeout":
+        return {"ok": False, "already": False, "code": None, "status": None, "error": "timeout"}
+    return {"ok": True, "already": False, "code": 0, "status": 200}
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="codebuddy-webui-browser-") as directory:
         root = Path(directory)
         os.environ["CODEBUDDY_AUTH_DIR"] = directory
-        gateway.CONFIG.update(api_key="synthetic-e2e-key", log_path=None, auto_trial=False,
+        gateway.CONFIG.update(api_key="synthetic-e2e-key", log_path=None,
+                              trial_ledger=gateway.trial_rewards.TrialLedger(root / "trial-ledger.json"),
                               control_store=ControlStore(root / "control.sqlite3"),
                               audit_store=AuditStore(root / "logs.sqlite3"))
         apply_persisted_settings(gateway.CONFIG, explicit=("api_key",), environ={})
@@ -61,6 +68,7 @@ def main():
         pool._sync_event.clear()
         gateway.CONFIG["management"] = Management(gateway)
         gateway.open_backend_stream = fake_backend
+        gateway.trial_rewards.claim_trial = fake_trial
         socket.socket.connect = forbid_connect
         install(gateway)
         try:

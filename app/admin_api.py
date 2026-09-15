@@ -48,6 +48,7 @@ def _public_credential(item):
               "models", "remaining", "enterprise_id", "product", "status", "sync_pending", "sync_error",
               "fail_until", "cooldown_until", "cooldown_remaining", "last_failure_at", "catalog_ready", "bindings",
               "auto_checkin", "auto_travel", "travel_supported", "checkin", "travel",
+              "trial_supported", "trial",
               "token_expired", "token_expires_at", "last_refresh_time", "sessions", "sticky_sessions", "last_error_code"}
     result = {key: value for key, value in item.items() if key in fields}
     identity = item.get("account_key") or item.get("id")

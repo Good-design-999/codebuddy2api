@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { OAuth } from "../OAuth";
+import { Trial } from "../Trial";
 import {
   api,
   credentialResponse,
@@ -102,6 +103,7 @@ export function Credentials() {
   const [drawer, setDrawer] = useState<"oauth" | "import" | "export" | null>(null);
   const [detail, setDetail] = useState<Credential | null>(null);
   const [deleting, setDeleting] = useState<Credential | null>(null);
+  const [trialTarget, setTrialTarget] = useState<Credential | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -272,7 +274,7 @@ export function Credentials() {
                     </th>
                     <th>凭证 / 产品</th>
                     <th>人工状态</th>
-                    <th>自动任务 / 上次结果</th>
+                    <th>账号任务 / 上次结果</th>
                     <th>认证健康</th>
                     <th>模型 429 冷却</th>
                     <th>官方余额 / 到期</th>
@@ -366,6 +368,9 @@ export function Credentials() {
                           </small>
                           {trip?.stale === true && <small>状态可能已变化，请先查询核验</small>}
                           {c.enabled === false && <small>账号停用期间不执行自动任务</small>}
+                          {c.trial_supported === true && c.trial != null && (
+                            <small>体验积分：{text(object(c.trial).message)}</small>
+                          )}
                         </td>
                         <td>
                           <Badge
@@ -439,6 +444,15 @@ export function Credentials() {
                             >
                               同步余额
                             </button>
+                            {c.trial_supported === true && (
+                              <button
+                                disabled={busy || c.enabled !== true}
+                                aria-label={`领取体验积分 ${c.name ?? c.id}`}
+                                onClick={() => setTrialTarget(c)}
+                              >
+                                领取体验积分
+                              </button>
+                            )}
                             {c.travel_supported === true && (
                               <>
                                 <button
@@ -488,6 +502,15 @@ export function Credentials() {
             <Empty title="还没有凭证">添加账号或导入 .info 文件。</Empty>
           ))}
       </Panel>
+      <DrawerPresence>
+        {trialTarget && (
+          <Trial
+            credential={trialTarget}
+            onClose={() => setTrialTarget(null)}
+            onDone={resource.reload}
+          />
+        )}
+      </DrawerPresence>
       <DrawerPresence>
         {drawer === "oauth" && <OAuth onClose={() => setDrawer(null)} onDone={oauthDone} />}
       </DrawerPresence>

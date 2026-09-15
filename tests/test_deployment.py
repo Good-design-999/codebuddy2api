@@ -78,7 +78,8 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(values["CODEBUDDY2API_KEY"], "")
         self.assertEqual(values["CODEBUDDY2API_BIND"], "127.0.0.1")
         self.assertEqual(values["CODEBUDDY2API_IMAGE"], "codebuddy2api:local")
-        self.assertEqual(values["CODEBUDDY2API_AUTO_TRIAL"], "false")
+        self.assertNotIn("CODEBUDDY2API_AUTO_TRIAL", values)
+        self.assertNotIn("CODEBUDDY2API_AUTO_TRIAL", (ROOT / "docker-compose.yml").read_text())
         self.assertEqual(values["CODEBUDDY2API_ADMIN_CSRF"], str(RUNTIME_DEFAULTS["admin_csrf"]).lower())
         self.assertNotIn("CODEBUDDY2API_KEEP_TOOL_METADATA", values)
 

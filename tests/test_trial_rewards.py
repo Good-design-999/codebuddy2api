@@ -65,7 +65,8 @@ class ClaimTrialTests(unittest.TestCase):
         with mock_http(respond):
             result = trial.claim_trial(headers())
         self.assertEqual(len(calls), 1)
-        self.assertEqual(set(result), {"ok", "already", "code", "status"})
+        self.assertTrue({"ok", "already", "code", "status"} <= set(result))
+        self.assertFalse(set(result) - {"ok", "already", "code", "status", "error"})
         return result
 
     def test_four_profiles_and_invalid_routing_rejected_before_client(self):
@@ -177,7 +178,8 @@ class ClaimTrialTests(unittest.TestCase):
 
             with self.subTest(exception=exception), mock_http(fail):
                 result = trial.claim_trial(headers())
-                self.assertEqual(result, {"ok": False, "already": False, "code": None, "status": None})
+                self.assertEqual(result, {"ok": False, "already": False, "code": None, "status": None,
+                                          "error": "timeout" if exception is httpx.ReadTimeout else "network_error"})
                 self.assertEqual(len(calls), 1)
 
 

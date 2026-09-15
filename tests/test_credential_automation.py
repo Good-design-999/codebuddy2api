@@ -24,7 +24,7 @@ class AutomationTests(unittest.TestCase):
 
     def periodic(self, entry):
         with patch.object(credits, 'fetch_credits', return_value={'credits': 10, 'intl': entry['profile'].startswith('intl')}):
-            return converter._sync_credits(self.pool, self.ledger, entry, checkin=True, failed=set(), claim_trial=False)
+            return converter._sync_credits(self.pool, self.ledger, entry, checkin=True, failed=set())
 
     def test_defaults_are_domestic_on_international_off(self):
         rows = self.client.get('/admin/credentials').json()['credentials']
@@ -162,7 +162,7 @@ class AutomationTests(unittest.TestCase):
             return {'state': 'available'}
         self.status_query.side_effect = status
         with patch.object(credits, 'daily_checkin') as claim, patch.object(credits, 'fetch_credits') as balance, \
-             patch.object(converter, '_sync_trial') as trial:
+             patch.object(converter.trial_rewards, 'claim_trial') as trial:
             failed = set()
             self.assertIsNone(converter._sync_credits(self.pool, self.ledger, entry, checkin=True, failed=failed))
             self.assertIn(entry['id'], failed)

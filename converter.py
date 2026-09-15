@@ -1106,25 +1106,7 @@ def _sync_error(pool, ledger, entry, generation, phase, error):
     _log(f"[{phase}] {Path(entry['id']).name} 同步失败（保留旧数据）: {message}")
 
 
-def _sync_trial(headers):
-    """可选福利领取与余额同步分离，持久化故障不阻断普通请求。"""
-    ledger = CONFIG.get("trial_ledger")
-    if not CONFIG.get("auto_trial") or ledger is None:
-        return
-    profile, uid = profile_for_headers(headers), headers.get("X-User-Id", "")
-    if profile != "intl-work" or not uid:
-        return
-    key = account_key(profile, uid, headers.get("X-Enterprise-Id", ""))
-    try:
-        previous = ledger.summary(key).get("attempted_at")
-        result = trial_rewards.attempt_trial(ledger, key, headers)
-        if ledger.summary(key).get("attempted_at") != previous:
-            _log(f"[trial] 领取检查 | ok={result['ok']} | already={result['already']} | code={result['code']} | status={result['status']}")
-    except Exception as error:
-        _log(f"[trial] 领取失败（不影响余额同步）: {_network_error_text(error)}")
-
-
-def _sync_credits(pool, ledger, entry, *, checkin, failed, claim_trial=True, expected_identity=None):
+def _sync_credits(pool, ledger, entry, *, checkin, failed, expected_identity=None):
     if not model_policy.credential_enabled(CONFIG, entry):
         return None
     cm, cid = entry["cm"], entry["id"]
@@ -1177,8 +1159,6 @@ def _sync_credits(pool, ledger, entry, *, checkin, failed, claim_trial=True, exp
                     return None
             except Exception as error:
                 _sync_error(pool, ledger, entry, generation, "travel", error)
-        if claim_trial:
-            _sync_trial(headers)
         if not model_policy.credential_enabled(CONFIG, entry):
             return None
         balance = credits_mod.fetch_credits(token, uid=uid, domain=domain)
@@ -1459,7 +1439,7 @@ CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "model_catalogs": {},   # 仅供展示的产品合并目录（选择器子集）
                 "account_catalogs": None,  # 生产按账号指纹绑定；None 仅兼容无持久缓存的嵌入模式
                                            # 每项含 models（选择器子集）与 serves（账号根表候选）
-                "auto_trial": False, "trial_ledger": None,
+                "trial_ledger": None,
                 "model_guard": True,     # 表外模型本地拦截，不转发上游
                 "max_images": 16, "image_policy": "truncate",
                 "max_request_bytes": 32 * 1024 * 1024, "log_body_limit": 65536,
@@ -3498,15 +3478,17 @@ def main():
                          "证明正文没写完，上游是否已按半截正文计费看不到，因此要显式开启（同时作用于连接"
                          "重试与 --failover-max 换凭证重放）")
     ap.add_argument("--auto-trial", type=_boolean_arg, nargs="?", const=True,
-                    default=os.environ.get("CODEBUDDY2API_AUTO_TRIAL", "false"),
-                    help="自动领取国际 WorkBuddy 一次性体验积分，默认关闭")
+                    default=None, help=argparse.SUPPRESS)
     args = ap.parse_args()
+    if args.auto_trial is not None or "CODEBUDDY2API_AUTO_TRIAL" in os.environ:
+        sys.stderr.write("[trial] AUTO_TRIAL / --auto-trial 已停用；请在 WebUI 凭证页手动领取体验积分。\n")
+    del args.auto_trial
     if args.image_policy not in ("truncate", "error"):
         ap.error("CODEBUDDY2API_IMAGE_POLICY 必须为 truncate 或 error")
     if args.command == "login":
         return login(site=args.site, open_browser=not args.no_browser)
 
-    for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit", "auto_trial",
+    for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit",
                 "tool_call_max_retry", "max_inbound_bytes", "max_collect_bytes", "max_concurrent",
                 "failover_max", "retry_write_timeout"):
         CONFIG[key] = getattr(args, key)
