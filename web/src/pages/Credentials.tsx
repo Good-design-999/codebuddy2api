@@ -16,6 +16,7 @@ import {
   Badge,
   DataValue,
   Drawer,
+  DrawerPresence,
   Empty,
   ErrorNotice,
   Fields,
@@ -104,6 +105,34 @@ export function Credentials() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [maintenance, setMaintenance] = useState<Record<string, unknown>[]>([]);
+  const maintain = (action: "refresh" | "checkin" | "sync", credential?: Credential) => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setMaintenance([]);
+    const path = credential
+      ? `/credentials/${encodeURIComponent(credential.id)}/${action}`
+      : `/${action}`;
+    void api
+      .post(path, undefined, { timeout: 300000 })
+      .then(({ data }) => {
+        const results = list(object(data).results, "凭证操作结果");
+        if (
+          !results.length ||
+          results.some((r) => typeof r.ok !== "boolean" || typeof r.message !== "string")
+        )
+          throw new Error("未收到完整操作结果，请刷新列表核验，勿直接重复执行");
+        setMaintenance(results);
+      })
+      .catch((err: unknown) =>
+        setError(`${errorMessage(err)}；请求失败不代表后台已停止，请刷新列表核验。`),
+      )
+      .finally(() => {
+        setBusy(false);
+        resource.reload();
+      });
+  };
   const oauthDone = useCallback(() => {
     setDrawer(null);
     setNotice("授权完成，凭证已添加。");
@@ -147,6 +176,21 @@ export function Credentials() {
       )}
       <ResourceState {...resource} />
       <ErrorNotice message={error} />
+      {maintenance.length > 0 && (
+        <Panel title="凭证操作结果">
+          <ul className={s.operationResults} aria-live="polite">
+            {maintenance.map((r, i) => (
+              <li key={i}>
+                <strong>{text(r.name)}</strong>
+                <Badge tone={r.ok ? "good" : "warn"}>
+                  {r.ok ? "已完成" : r.skipped ? "已跳过" : "未完成"}
+                </Badge>
+                <span>{text(r.message)}</span>
+              </li>
+            ))}
+          </ul>
+        </Panel>
+      )}
       <Panel
         title="账号凭证"
         hint={resource.data ? `${resource.data.length} 个账号` : "等待凭证列表"}
@@ -155,11 +199,15 @@ export function Credentials() {
           <div className={s.actions}>
             <button onClick={resource.reload}>
               <Icon name="refresh" />
-              刷新
+              刷新列表
             </button>
-            <button disabled={busy} onClick={() => run(() => api.post("/checkin"))}>
-              签到 / 同步余额
+            <button disabled={busy} onClick={() => maintain("checkin")}>
+              批量签到
             </button>
+            <button disabled={busy} onClick={() => maintain("sync")}>
+              同步全部余额
+            </button>
+            {busy && <span role="status">操作执行中，请勿重复提交…</span>}
           </div>
           <button disabled={!liveSelected.length} onClick={() => setDrawer("export")}>
             导出已选 ({liveSelected.length})
@@ -289,6 +337,27 @@ export function Credentials() {
                           <div className={s.rowActions}>
                             <button onClick={() => setDetail(c)}>详情</button>
                             <button
+                              disabled={busy || c.enabled !== true}
+                              aria-label={`刷新凭证 ${c.name ?? c.id}`}
+                              onClick={() => maintain("refresh", c)}
+                            >
+                              刷新 Token
+                            </button>
+                            <button
+                              disabled={busy || c.enabled !== true}
+                              aria-label={`签到 ${c.name ?? c.id}`}
+                              onClick={() => maintain("checkin", c)}
+                            >
+                              签到
+                            </button>
+                            <button
+                              disabled={busy || c.enabled !== true}
+                              aria-label={`同步余额 ${c.name ?? c.id}`}
+                              onClick={() => maintain("sync", c)}
+                            >
+                              同步余额
+                            </button>
+                            <button
                               disabled={busy || typeof c.enabled !== "boolean"}
                               onClick={() =>
                                 run(() =>
@@ -319,82 +388,92 @@ export function Credentials() {
             <Empty title="还没有凭证">添加账号或导入 .info 文件。</Empty>
           ))}
       </Panel>
-      {drawer === "oauth" && <OAuth onClose={() => setDrawer(null)} onDone={oauthDone} />}
-      {drawer === "import" && (
-        <ImportDrawer onClose={() => setDrawer(null)} onDone={resource.reload} />
-      )}{" "}
-      {detail && (
-        <Drawer title="凭证详情" onClose={() => setDetail(null)}>
-          <Fields data={detail} />
-        </Drawer>
-      )}
-      {deleting && (
-        <Drawer title="删除凭证" onClose={() => setDeleting(null)} dismissDisabled={busy}>
-          <div className={s.warning}>
-            将永久删除 {deleting.name}，不可撤销。如已绑定模型规则，请先解除绑定。
-          </div>
-          <ErrorNotice message={error} />
-          <button
-            className={s.danger}
-            disabled={busy}
-            onClick={() =>
-              run(() => api.delete(`/credentials/${encodeURIComponent(deleting.name!)}`))
-            }
-          >
-            确认删除凭证
-          </button>
-        </Drawer>
-      )}
-      {drawer === "export" && (
-        <Drawer title="导出明文凭证" onClose={() => setDrawer(null)} dismissDisabled={busy}>
-          <div className={s.warning}>
-            <Icon name="alert" />
-            <div>
-              <strong>文件包含明文认证信息</strong>
-              <p>
-                将导出 {liveSelected.length}{" "}
-                个凭证，他人可能借此使用账号。请仅保存在可信设备，勿分享或公开上传。
-              </p>
+      <DrawerPresence>
+        {drawer === "oauth" && <OAuth onClose={() => setDrawer(null)} onDone={oauthDone} />}
+      </DrawerPresence>
+      <DrawerPresence>
+        {drawer === "import" && (
+          <ImportDrawer onClose={() => setDrawer(null)} onDone={resource.reload} />
+        )}
+      </DrawerPresence>
+      <DrawerPresence>
+        {detail && (
+          <Drawer title="凭证详情" onClose={() => setDetail(null)}>
+            <Fields data={detail} />
+          </Drawer>
+        )}
+      </DrawerPresence>
+      <DrawerPresence>
+        {deleting && (
+          <Drawer title="删除凭证" onClose={() => setDeleting(null)} dismissDisabled={busy}>
+            <div className={s.warning}>
+              将永久删除 {deleting.name}，不可撤销。如已绑定模型规则，请先解除绑定。
             </div>
-          </div>
-          <ErrorNotice message={error} />
-          <button
-            className={s.danger}
-            disabled={busy || !liveSelected.length}
-            onClick={() => {
-              setBusy(true);
-              setError(null);
-              void api
-                .post<Blob>(
-                  "/credentials/export",
-                  { ids: liveSelected, confirm: true },
-                  { responseType: "blob" },
-                )
-                .then((response) => {
-                  if (!response.data.size) throw new Error("导出响应为空");
-                  const type = String(response.headers["content-type"] ?? "");
-                  if (type.includes("json") || type.includes("html"))
-                    throw new Error("导出响应不是凭证附件");
-                  const url = URL.createObjectURL(response.data);
-                  const link = document.createElement("a");
-                  link.href = url;
-                  const header = String(response.headers["content-disposition"] ?? "");
-                  link.download = downloadFilename(
-                    header,
-                    liveSelected.length === 1 ? "credential.info" : "credentials.zip",
-                  );
-                  link.click();
-                  setTimeout(() => URL.revokeObjectURL(url), 1000);
-                  setDrawer(null);
-                })
-                .catch((err: unknown) => setError(errorMessage(err)))
-                .finally(() => setBusy(false));
-            }}
-          >
-            我理解明文风险，下载已选凭证
-          </button>
-        </Drawer>
-      )}
+            <ErrorNotice message={error} />
+            <button
+              className={s.danger}
+              disabled={busy}
+              onClick={() =>
+                run(() => api.delete(`/credentials/${encodeURIComponent(deleting.name!)}`))
+              }
+            >
+              确认删除凭证
+            </button>
+          </Drawer>
+        )}
+      </DrawerPresence>
+      <DrawerPresence>
+        {drawer === "export" && (
+          <Drawer title="导出明文凭证" onClose={() => setDrawer(null)} dismissDisabled={busy}>
+            <div className={s.warning}>
+              <Icon name="alert" />
+              <div>
+                <strong>文件包含明文认证信息</strong>
+                <p>
+                  将导出 {liveSelected.length}{" "}
+                  个凭证，他人可能借此使用账号。请仅保存在可信设备，勿分享或公开上传。
+                </p>
+              </div>
+            </div>
+            <ErrorNotice message={error} />
+            <button
+              className={s.danger}
+              disabled={busy || !liveSelected.length}
+              onClick={() => {
+                setBusy(true);
+                setError(null);
+                void api
+                  .post<Blob>(
+                    "/credentials/export",
+                    { ids: liveSelected, confirm: true },
+                    { responseType: "blob" },
+                  )
+                  .then((response) => {
+                    if (!response.data.size) throw new Error("导出响应为空");
+                    const type = String(response.headers["content-type"] ?? "");
+                    if (type.includes("json") || type.includes("html"))
+                      throw new Error("导出响应不是凭证附件");
+                    const url = URL.createObjectURL(response.data);
+                    const link = document.createElement("a");
+                    link.href = url;
+                    const header = String(response.headers["content-disposition"] ?? "");
+                    link.download = downloadFilename(
+                      header,
+                      liveSelected.length === 1 ? "credential.info" : "credentials.zip",
+                    );
+                    link.click();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    setDrawer(null);
+                  })
+                  .catch((err: unknown) => setError(errorMessage(err)))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              我理解明文风险，下载已选凭证
+            </button>
+          </Drawer>
+        )}
+      </DrawerPresence>
     </>
   );
 }

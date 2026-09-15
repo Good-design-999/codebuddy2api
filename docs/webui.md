@@ -11,8 +11,10 @@ Management is locked without a key. After changing it, sign in again and restart
 ## Common tasks
 
 - **Overview:** select 1/7/30/90 days and automatic/hourly/daily granularity. Automatic uses hours for one day and days otherwise; ranges still follow UTC calendar days. Missing hourly history is marked, never reconstructed from daily totals, and detail cleanup preserves hourly aggregates. Official balances may include usage from other clients.
+  - Hover or tap the trend for the period's requests, successes and failures; keyboard arrows and Home/End select points. Missing hourly spans stay empty.
 - **Credentials:** select Mainland China (CN), International WorkBuddy or International CodeBuddy for browser login, or import `.info`/ZIP files. Distinguish manual disabling, credential-level authentication circuits and model-level 429 cooldowns. Disabling keeps files; deletion removes them and requires removing model bindings first. Exports preserve safe UTF-8 filenames (otherwise `credential.info`/`credentials.zip`) and contain plaintext credentials; do not share them.
   - Successful OAuth enrollment closes the drawer and refreshes the list. The official tab keeps `noopener` isolation and must be closed manually. Failures stay visible; closing the drawer stops polling.
+  - Each row has independent Token refresh, check-in and balance sync. Batch check-in and sync are separate. Sync updates balances, catalogs and usage without check-in or trial claims; failures retain prior successful data. Busy maintenance returns 409 rather than queuing duplicate work; a client timeout does not cancel server work.
 - **Models:** add independent mappings with public/upstream IDs and local enablement. Choose either specific accounts or a region with an optional product filter; switching modes clears the opposite binding. Unavailable candidates never cause out-of-scope fallback.
 - **Logs:** filter requests and inspect failed attempts. Closing details or switching log type cancels pending detail loads. Clearing details keeps historical statistics.
 - **Settings:** edit unlocked options; hot changes apply immediately, while restart-marked settings require a manual restart. Change locked options in the startup configuration; see [configuration precedence](advanced.md).
@@ -21,6 +23,8 @@ Management is locked without a key. After changing it, sign in again and restart
 Clearing **all logs and statistics** is irreversible. Enter the confirmation text shown in the dialog and re-enter the current API key. This does not delete credentials or gateway settings.
 
 The sidebar remembers its icon-only mode. Drawers lock background scrolling, close on backdrop clicks or Esc, and restore focus; saves, imports and deletions prevent accidental dismissal while pending. Details use labeled fields and status groups with folded raw diagnostics. Glass surfaces fall back to solid colors when transparency is reduced or blur is unsupported.
+
+The appearance icon offers light, dark and system-following modes. Four palettes affect light mode only; dark mode stays fixed and the light preference is retained. Preferences are browser-local. Drawers fade/slide in and out, retaining the scroll lock through exit; reduced-motion settings skip animation.
 
 ## Model mappings and statistics API
 

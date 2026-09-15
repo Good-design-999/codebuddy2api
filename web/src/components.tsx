@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { api, errorMessage, object } from "./api";
 import { lockPage } from "./modal";
+import { useExiting } from "./presence";
+export { DrawerPresence } from "./presence";
 import s from "./ui.module.scss";
 
 export function Icon({ name = "grid" }: { name?: string }) {
@@ -19,6 +21,11 @@ export function Icon({ name = "grid" }: { name?: string }) {
     shield: "m12 2 8 3v6c0 5-8 11-8 11S4 16 4 11V5l8-3Zm-4 9 3 3 5-6",
     leaf: "M20 3C7 2 1 8 5 16s17 4 15-13ZM5 20 16 8",
     alert: "m12 3 10 18H2L12 3Zm0 5v6m0 3v1",
+    appearance:
+      "M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1-3.7 1.5 1.5 0 0 1 1-2.8h2a4 4 0 0 0 4-4C21 6.4 17 3 12 3ZM7 10h.01M10 7h.01M15 7h.01M17 10h.01",
+    sun: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5",
+    moon: "M20 15A9 9 0 0 1 9 4a9 9 0 1 0 11 11Z",
+    system: "M3 4h18v13H3zM8 21h8m-4-4v4",
   };
   return (
     <svg
@@ -130,12 +137,15 @@ export function Drawer({
   children,
   onClose,
   dismissDisabled = false,
+  className = "",
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
   dismissDisabled?: boolean;
+  className?: string;
 }) {
+  const exiting = useExiting();
   const ref = useRef<HTMLDialogElement>(null);
   const outside = useRef(false);
   const id = useId();
@@ -154,7 +164,8 @@ export function Drawer({
   }, []);
   return (
     <dialog
-      className={s.modalOverlay}
+      className={`${s.modalOverlay} ${exiting ? s.exiting : ""}`}
+      data-phase={exiting ? "exiting" : "open"}
       ref={ref}
       aria-labelledby={id}
       onPointerDown={(e) => {
@@ -163,14 +174,14 @@ export function Drawer({
       onClick={(e) => {
         const dismiss = outside.current && e.target === e.currentTarget;
         outside.current = false;
-        if (dismiss && !dismissDisabled) onClose();
+        if (dismiss && !dismissDisabled && !exiting) onClose();
       }}
       onCancel={(e) => {
         e.preventDefault();
-        if (!dismissDisabled) onClose();
+        if (!dismissDisabled && !exiting) onClose();
       }}
     >
-      <section className={s.drawer}>
+      <section className={`${s.drawer} ${className}`} inert={exiting}>
         <div className={s.drawerHead}>
           <h2 id={id}>{title}</h2>
           <button type="button" aria-label="关闭抽屉" disabled={dismissDisabled} onClick={onClose}>

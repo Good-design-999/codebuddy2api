@@ -72,7 +72,9 @@ Use a source/image build and Compose configuration containing this feature; recr
 | `DELETE /admin/credentials/{name}` | Delete the credential file by filename; returns 409 while referenced by model bindings |
 | `PATCH /admin/credentials/{id}` | Enable/disable by account identity ID, without deleting files |
 | `POST /admin/oauth/start` · `GET /admin/oauth/poll` | Start/poll login; `site=cn` (default), `intl` (international WorkBuddy) or `intl-codebuddy` (international CodeBuddy) |
-| `GET /admin/credits` · `POST /admin/checkin` | Inspect credits; trigger check-in and credit synchronization |
+| `GET /admin/credits` · `POST /admin/checkin` | Inspect credits; check in only (daily-idempotent) |
+| `POST /admin/sync` | Synchronize all enabled accounts' balances, catalogs and usage; no check-in or trial claims |
+| `POST /admin/credentials/{id}/{action}` | Single-account `refresh` (Token), `checkin` or `sync`; returns per-account results |
 
 Pages use `/dashboard/*`, management APIs use `/admin/*`, and clients retain `/v1/*`. `/cn` and `/intl` API prefixes are not registered. Automatic model routing requires no client URL changes.
 

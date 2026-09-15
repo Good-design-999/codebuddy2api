@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errorMessage, number, object, text } from "./api";
 import { Drawer, ErrorNotice, Icon } from "./components";
+import { useExiting } from "./presence";
 import s from "./ui.module.scss";
 
 export function safeOAuthUrl(value: unknown): string {
@@ -23,15 +24,19 @@ export function safeOAuthUrl(value: unknown): string {
   return url.href;
 }
 export function OAuth({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const exiting = useExiting();
   const [site, setSite] = useState("cn");
   const [login, setLogin] = useState<{ id: string; url: string; until: number } | null>(null);
   const [message, setMessage] = useState("选择站点后发起授权。");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const controller = useRef<AbortController | null>(null);
-  useEffect(() => () => controller.current?.abort(), []);
   useEffect(() => {
-    if (!login) return;
+    if (exiting) controller.current?.abort();
+    return () => controller.current?.abort();
+  }, [exiting]);
+  useEffect(() => {
+    if (!login || exiting) return;
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
@@ -73,7 +78,7 @@ export function OAuth({ onClose, onDone }: { onClose: () => void; onDone: () => 
       abort.abort();
       clearTimeout(timer);
     };
-  }, [login, onDone]);
+  }, [login, onDone, exiting]);
   return (
     <Drawer title="OAuth 添加凭证" onClose={onClose}>
       <p className={s.note}>

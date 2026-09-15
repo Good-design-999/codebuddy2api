@@ -72,7 +72,9 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 | `DELETE /admin/credentials/{name}` | 按文件名删除凭证文件；仍被模型绑定引用时返回 409 |
 | `PATCH /admin/credentials/{id}` | 按账号身份 ID 启停凭证，不删除文件 |
 | `POST /admin/oauth/start` · `GET /admin/oauth/poll` | 发起与轮询登录；`site=cn`（默认）、`intl`（国际 WorkBuddy）或 `intl-codebuddy`（国际 CodeBuddy） |
-| `GET /admin/credits` · `POST /admin/checkin` | 查询额度、手动触发签到与额度同步 |
+| `GET /admin/credits` · `POST /admin/checkin` | 查询额度；仅签到（按日幂等） |
+| `POST /admin/sync` | 同步全部启用账号的余额、目录和用量，不签到、不领取试用 |
+| `POST /admin/credentials/{id}/{action}` | 单账号 `refresh`（Token）、`checkin` 或 `sync`；返回逐账号结果 |
 
 页面使用 `/dashboard/*`，管理 API 使用 `/admin/*`，客户端保留原 `/v1/*`；不注册 `/cn`、`/intl` API 前缀。模型自动选路不要求客户端改变地址。
 

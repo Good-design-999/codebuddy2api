@@ -15,6 +15,7 @@ import {
   Badge,
   DataValue,
   Drawer,
+  DrawerPresence,
   Empty,
   ErrorNotice,
   Icon,
@@ -532,50 +533,54 @@ export function Models() {
             </Empty>
           ))}
       </Panel>
-      {(editing || creating) && resource.data && (
-        <ModelEditor
-          model={editing ?? emptyRule}
-          creating={creating}
-          models={resource.data.models}
-          credentials={credentials.data}
-          revision={resource.data.revision}
-          onClose={() => {
-            setEditing(null);
-            setCreating(false);
-          }}
-          onSaved={resource.reload}
-        />
-      )}
-      {deleting && resource.data && (
-        <Drawer title="删除自建模型" onClose={() => setDeleting(null)} dismissDisabled={busy}>
-          <p className={s.warning}>
-            删除 {deleting.public_id} 的本地路由。不会删除上游模型、账号或历史统计。
-          </p>
-          <ErrorNotice message={error} />
-          <button
-            className={s.danger}
-            disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              setError(null);
-              void api
-                .delete(`/models/${encodeURIComponent(deleting.id)}`, {
-                  data: { revision: resource.data!.revision },
-                })
-                .then((response) => {
-                  if (object(response.data).ok !== true)
-                    throw new Error("后端未确认删除，请刷新后核验");
-                  setDeleting(null);
-                  resource.reload();
-                })
-                .catch((err: unknown) => setError(errorMessage(err)))
-                .finally(() => setBusy(false));
+      <DrawerPresence>
+        {(editing || creating) && resource.data && (
+          <ModelEditor
+            model={editing ?? emptyRule}
+            creating={creating}
+            models={resource.data.models}
+            credentials={credentials.data}
+            revision={resource.data.revision}
+            onClose={() => {
+              setEditing(null);
+              setCreating(false);
             }}
-          >
-            {busy ? "正在删除…" : "确认删除模型"}
-          </button>
-        </Drawer>
-      )}
+            onSaved={resource.reload}
+          />
+        )}
+      </DrawerPresence>
+      <DrawerPresence>
+        {deleting && resource.data && (
+          <Drawer title="删除自建模型" onClose={() => setDeleting(null)} dismissDisabled={busy}>
+            <p className={s.warning}>
+              删除 {deleting.public_id} 的本地路由。不会删除上游模型、账号或历史统计。
+            </p>
+            <ErrorNotice message={error} />
+            <button
+              className={s.danger}
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                setError(null);
+                void api
+                  .delete(`/models/${encodeURIComponent(deleting.id)}`, {
+                    data: { revision: resource.data!.revision },
+                  })
+                  .then((response) => {
+                    if (object(response.data).ok !== true)
+                      throw new Error("后端未确认删除，请刷新后核验");
+                    setDeleting(null);
+                    resource.reload();
+                  })
+                  .catch((err: unknown) => setError(errorMessage(err)))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              {busy ? "正在删除…" : "确认删除模型"}
+            </button>
+          </Drawer>
+        )}
+      </DrawerPresence>
     </>
   );
 }
