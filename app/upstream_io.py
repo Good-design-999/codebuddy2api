@@ -18,6 +18,14 @@ class UpstreamResponseError(Exception):
         super().__init__(f"upstream HTTP {status}")
 
 
+class UpstreamHTTPError(UpstreamResponseError):
+    """上游**用 HTTP 状态码**给出的答复（429 / 401 / 503 …）。
+
+    与聚合器从 200 响应体里合成的 502（空流、坏 SSE、已开流后断连）区分开：只有前者的请求
+    确定没被上游收下处理，换一个账号重放不会重复计费；后者上游已经回了 200，可能已经计费。
+    """
+
+
 class ChatSSEAccumulator:
     """聚合 Chat SSE，拒绝错误事件、空输出和无结束标记的残流。"""
 
@@ -169,9 +177,27 @@ async def read_bounded_error(response, limit: int = ERROR_BODY_LIMIT) -> bytes:
     return bytes(buf)
 
 
+# 写下第一个请求体字节之前就失败：上游手里没有任何正文，重放零风险。
+BODY_NOT_ACCEPTED = (httpx.ConnectError, httpx.ConnectTimeout)
+# 写请求体超时：只证明「声明的正文没写完」，证不了上游没收到或没处理已经收到的那部分。
+# 半截正文会怎样是上游的行为，从这一侧观察不到，因此默认不重放（见 `retry_write_timeout`）。
+WRITE_TIMEOUT = (httpx.WriteTimeout,)
+
+
 @asynccontextmanager
-async def open_backend_stream(url, headers, body, *, read_timeout=300, on_retry=None):
-    """只重试一次建连失败，其他错误交给调用方按协议返回。"""
+async def open_backend_stream(url, headers, body, *, read_timeout=300, on_retry=None,
+                              retry_write_timeout=False):
+    """只重试一次「上游确定没收下请求体」的失败（建连失败 / 建连超时），其余交给调用方按协议返回。
+
+    重试每次新建 `AsyncClient`，即重建 TCP+TLS，通常能换到另一个边缘节点。
+
+    `retry_write_timeout=True` 把 60s 写超时也算进重放集。跨境长会话最容易撞的正是写超时
+    而不是建连失败，实测某部署的传输失败 100% 是它；但写超时能证明的只有「正文没写完」，
+    上游是否已按半截正文动过账，这一侧看不到，所以留给运维显式决定。
+
+    响应已经开始之后（`opened` 置位）绝不重放 POST。
+    """
+    retryable = BODY_NOT_ACCEPTED + (WRITE_TIMEOUT if retry_write_timeout else ())
     timeout = httpx.Timeout(read_timeout, connect=15, write=60, pool=15)
     for attempt in range(2):
         opened = False
@@ -181,7 +207,7 @@ async def open_backend_stream(url, headers, body, *, read_timeout=300, on_retry=
                     opened = True
                     yield response
                     return
-        except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+        except retryable as error:
             if opened or attempt == 1:
                 raise
             if on_retry is not None:
